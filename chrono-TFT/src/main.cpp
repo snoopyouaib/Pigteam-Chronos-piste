@@ -1227,6 +1227,13 @@ static unsigned long confirmStopEnteredMs = 0;
 // reaction -- on ignore donc PUSH (reprendre) pendant cette fenetre courte
 // apres l'ouverture de l'ecran. BACK (arret definitif) n'est PAS concerne.
 static const unsigned long CONFIRM_STOP_INPUT_GRACE_MS = 600UL;
+// Idem, mais cote ecran Statut : une fois l'arret DEFINITIF confirme, le
+// geofencing (rayon 15km) peut redetecter le circuit et rearmer le
+// declencheur REC en ~1s si on est pres de la piste (constate au banc sur
+// l'AMOLED le 27/07, meme code de geofencing ici). Protege le PUSH de
+// l'ecran Statut juste apres un arret definitif.
+static unsigned long lastDefinitiveStopMs = 0;
+static const unsigned long STATUS_REC_GRACE_AFTER_STOP_MS = 1500UL;
 static int menuSelection = 0;      // reutilise pour le sous-menu Circuit (cf. plus bas)
 static int mainMenuSelection = 0;  // menu principal -- 0=Circuit, 1=Connexion, 2=Session, 3=Reglages, 4=New track (capture)
 static int sessionListSelection = 0;
@@ -1788,7 +1795,8 @@ void loop() {
     if (rotaryEncoder.encoderChanged()) {
     }
 
-    if (rotaryEncoder.isEncoderButtonClicked()) {
+    if (rotaryEncoder.isEncoderButtonClicked() &&
+        (millis() - lastDefinitiveStopMs) >= STATUS_REC_GRACE_AFTER_STOP_MS) {
       if (recordingEnabled) {
         // PUSH ne stoppe plus directement -- passe par un ecran de
         // confirmation (cf. SCREEN_CONFIRM_STOP). stopRecording() ici agit
@@ -1833,6 +1841,7 @@ void loop() {
       // fois qu'on a quitte la piste. Le timeout couvre le cas ou on
       // oublie de confirmer (BACK) avant de prendre la route.
       activateAutoMode(); // reset complet du courseManager + des flags d'armement
+      lastDefinitiveStopMs = millis(); // cf. STATUS_REC_GRACE_AFTER_STOP_MS -- le geofencing peut rearmer le circuit en ~1s
       screenNeedsFullRedraw = true;
       uiDirty = true;
       screenState = SCREEN_STATUS;
