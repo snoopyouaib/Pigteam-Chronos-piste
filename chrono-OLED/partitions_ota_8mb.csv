@@ -1,0 +1,22 @@
+# Table de partitions pour ESP32-S3-Tiny N8R8 (8MB flash)
+# ---------------------------------------------------------------------
+# Meme structure que partitions_ota.csv (S3-Zero, 4MB), mais partition
+# "spiffs" (= LittleFS, cf. board_build.filesystem dans platformio.ini)
+# agrandie pour profiter des 8MB disponibles -- c'est le but de cette
+# carte : plus d'espace pour les logs GPS detailles (log_*.csv) et le
+# carnet de session cumulatif (sessions.csv), sans avoir a gerer une
+# rotation/suppression des vieilles sessions aussi vite qu'avant.
+#
+# app0/app1 laisses a la meme taille que sur le S3-Zero (0x160000,
+# 1.375MB chacune) -- le firmware actuel y tient avec de la marge,
+# aucune raison de les agrandir. Toute la place liberee par le passage
+# 4MB -> 8MB part donc entierement dans "spiffs" :
+#   4MB (ancien total) -> ~1.19MB pour spiffs
+#   8MB (nouveau total) -> ~5.19MB pour spiffs (ce fichier)
+#
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x5000,
+otadata,  data, ota,     0xe000,   0x2000,
+app0,     app,  ota_0,   0x10000,  0x160000,
+app1,     app,  ota_1,   0x170000, 0x160000,
+spiffs,   data, spiffs,  0x2D0000, 0x530000,
