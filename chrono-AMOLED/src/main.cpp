@@ -837,6 +837,15 @@ static unsigned long confirmStopEnteredMs = 0;
 // de l'ecran. BACK (arret definitif) n'est PAS concerne : c'est toujours
 // la direction "sure", pas besoin de la retarder.
 static const unsigned long CONFIRM_STOP_INPUT_GRACE_MS = 600UL;
+// Idem, mais cote ecran Statut : une fois l'arret DEFINITIF confirme, le
+// geofencing (rayon 15km, cf. GEOFENCE_MAX_DISTANCE_M) peut redetecter le
+// circuit et rearmer le bouton REC en ~1s si on est pres de la piste --
+// constate au banc (cf. log Serial du 27/07 : "Retour en mode detection
+// automatique" suivi de "REC ON" en une poignee de lignes). Cette fenetre
+// protege specifiquement le REC de l'ecran Statut juste apres un arret
+// definitif, en plus de la protection REPRENDRE ci-dessus.
+static unsigned long lastDefinitiveStopMs = 0;
+static const unsigned long STATUS_REC_GRACE_AFTER_STOP_MS = 1500UL;
 static bool selectingMode = false; // true = encodeur en mode "selection dans la liste" (Circuit/Session/Reglages)
 
 static int ringIndex = 0;        // 0=Circuit,1=NouveauCircuit,2=Connexion,3=Session,4=Reglages
@@ -939,6 +948,7 @@ static lv_obj_t* lblTours;
 // Tap sur le bouton REC (visible uniquement en mode "circuit detecte") --
 // equivalent tactile du PUSH encodeur pour cette transition precise.
 static void btnRecClickedCb(lv_event_t* e) {
+  if (millis() - lastDefinitiveStopMs < STATUS_REC_GRACE_AFTER_STOP_MS) return; // cf. commentaire pres de la constante
   if (detectionEffectivelyComplete() && !recordingEnabled) {
     startRecording();
   }
@@ -1588,6 +1598,7 @@ static void openSessionLaps(int i) {
 static void handlePush() {
   switch (currentScreen) {
     case SCR_STATUS:
+      if (millis() - lastDefinitiveStopMs < STATUS_REC_GRACE_AFTER_STOP_MS) break; // cf. commentaire pres de la constante
       if (!recordingEnabled && detectionEffectivelyComplete()) { // BACK arrete desormais (pas PUSH), cf. handleBack
         startRecording();
       }
@@ -1674,6 +1685,7 @@ static void handleBack() {
       // fois qu'on a quitte la piste. Le timeout dans loop() couvre le cas
       // ou on oublie de confirmer avant de prendre la route.
       activateAutoMode(); // reset complet du courseManager + des flags d'armement
+      lastDefinitiveStopMs = millis(); // cf. STATUS_REC_GRACE_AFTER_STOP_MS -- le geofencing peut rearmer le circuit en ~1s
       goToScreen(SCR_STATUS);
       break;
 
@@ -1841,6 +1853,7 @@ void loop() {
     // on confirme l'arret tout seul plutot que de laisser cet ecran arme
     // indefiniment (cf. commentaire pres de CONFIRM_STOP_TIMEOUT_MS).
     activateAutoMode();
+    lastDefinitiveStopMs = nowMs; // cf. STATUS_REC_GRACE_AFTER_STOP_MS -- le geofencing peut rearmer le circuit en ~1s
     goToScreen(SCR_STATUS);
   }
 
