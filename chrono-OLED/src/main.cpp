@@ -1011,6 +1011,11 @@ static ScreenState screenState = SCREEN_STATUS;
 // faux contact pourrait relancer l'enregistrement (cf. bug du 27/07).
 static const unsigned long CONFIRM_STOP_TIMEOUT_MS = 120000UL; // 2 minutes
 static unsigned long confirmStopEnteredMs = 0;
+// Faux contact electrique = evenement quasi instantane. Un vrai choix
+// humain de REPRENDRE prend toujours au moins quelques centaines de ms de
+// reaction -- on ignore donc PUSH (reprendre) pendant cette fenetre courte
+// apres l'ouverture de l'ecran. BACK (arret definitif) n'est PAS concerne.
+static const unsigned long CONFIRM_STOP_INPUT_GRACE_MS = 600UL;
 static int menuSelection = 0; // reutilise pour chaque sous-menu (le sens depend de screenState)
 
 // ----- Menu principal -----
@@ -1964,7 +1969,7 @@ void loop() {
     }
 
   } else if (screenState == SCREEN_CONFIRM_STOP) {
-    if (pushReleased) {
+    if (pushReleased && (millis() - confirmStopEnteredMs) >= CONFIRM_STOP_INPUT_GRACE_MS) {
       // REPRENDRE -- le circuit etait toujours arme (pas de reset), donc
       // startRecording() repart immediatement sans repasser par la detection.
       startRecording();

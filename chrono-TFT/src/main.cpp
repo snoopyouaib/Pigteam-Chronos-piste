@@ -1222,6 +1222,11 @@ static ScreenState screenState = SCREEN_STATUS;
 // faux contact (vibrations, etc.) pourrait relancer l'enregistrement.
 static const unsigned long CONFIRM_STOP_TIMEOUT_MS = 120000UL; // 2 minutes
 static unsigned long confirmStopEnteredMs = 0;
+// Faux contact electrique = evenement quasi instantane. Un vrai choix
+// humain de REPRENDRE prend toujours au moins quelques centaines de ms de
+// reaction -- on ignore donc PUSH (reprendre) pendant cette fenetre courte
+// apres l'ouverture de l'ecran. BACK (arret definitif) n'est PAS concerne.
+static const unsigned long CONFIRM_STOP_INPUT_GRACE_MS = 600UL;
 static int menuSelection = 0;      // reutilise pour le sous-menu Circuit (cf. plus bas)
 static int mainMenuSelection = 0;  // menu principal -- 0=Circuit, 1=Connexion, 2=Session, 3=Reglages, 4=New track (capture)
 static int sessionListSelection = 0;
@@ -1811,7 +1816,8 @@ void loop() {
     }
 
   } else if (screenState == SCREEN_CONFIRM_STOP) {
-    if (rotaryEncoder.isEncoderButtonClicked()) {
+    if (rotaryEncoder.isEncoderButtonClicked() &&
+        (millis() - confirmStopEnteredMs) >= CONFIRM_STOP_INPUT_GRACE_MS) {
       // REPRENDRE -- le circuit etait toujours arme (pas de reset), donc
       // startRecording() repart immediatement sans repasser par la detection.
       startRecording();

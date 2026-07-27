@@ -830,6 +830,13 @@ static AppScreen currentScreen = SCR_STATUS;
 // l'enregistrement (cf. bug du 27/07 -- circuit jamais desarme apres stop).
 static const unsigned long CONFIRM_STOP_TIMEOUT_MS = 120000UL; // 2 minutes
 static unsigned long confirmStopEnteredMs = 0;
+// Faux contact electrique (bruit sur l'alim, pas forcement un vrai doigt)
+// = evenement quasi instantane. Un vrai choix humain de REPRENDRE prend
+// toujours au moins quelques centaines de ms de reaction -- on ignore donc
+// REPRENDRE (tactile/PUSH) pendant cette fenetre courte apres l'ouverture
+// de l'ecran. BACK (arret definitif) n'est PAS concerne : c'est toujours
+// la direction "sure", pas besoin de la retarder.
+static const unsigned long CONFIRM_STOP_INPUT_GRACE_MS = 600UL;
 static bool selectingMode = false; // true = encodeur en mode "selection dans la liste" (Circuit/Session/Reglages)
 
 static int ringIndex = 0;        // 0=Circuit,1=NouveauCircuit,2=Connexion,3=Session,4=Reglages
@@ -1006,6 +1013,7 @@ static void buildStatusScreen() {
 static lv_obj_t* lblConfirmCountdown;
 
 static void btnReprendreClickedCb(lv_event_t* e) {
+  if (millis() - confirmStopEnteredMs < CONFIRM_STOP_INPUT_GRACE_MS) return; // cf. commentaire pres de la constante
   startRecording();
   goToScreen(SCR_STATUS);
 }
@@ -1587,6 +1595,7 @@ static void handlePush() {
 
     case SCR_CONFIRM_STOP:
       // Equivalent materiel du tap sur REPRENDRE -- cf. btnReprendreClickedCb.
+      if (millis() - confirmStopEnteredMs < CONFIRM_STOP_INPUT_GRACE_MS) break; // cf. commentaire pres de la constante
       startRecording();
       goToScreen(SCR_STATUS);
       break;
