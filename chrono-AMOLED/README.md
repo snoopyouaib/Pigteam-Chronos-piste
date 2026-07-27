@@ -37,13 +37,16 @@ cf. son header pour l'API complète). Dépendance requise :
   externe -- `readBatteryPercent()` réutilise la même courbe
   tension→pourcentage que le TFT, juste une source de tension
   différente.
-- **Écran** : LVGL (tactile + encodeur) au lieu d'Adafruit_GFX/
+- **Écran** : LVGL (tactile + PUSH/BACK) au lieu d'Adafruit_GFX/
   encodeur seul -- toute la logique GPS/CourseManager/sessions reprise
-  à l'identique, seul l'affichage change.
+  à l'identique, seul l'affichage change. Rotatif EC11 physiquement
+  retiré le 27/07, remplacé par un bouton poussoir simple sur la même
+  broche (cf. section dédiée plus bas) -- BACK reste un bouton séparé.
 - **Navigation** : anneau Circuit → Nouveau circuit → Connexion →
-  Session → Réglages (encodeur + swipe tactile + tap direct sur les
-  listes), pas le menu à 5 entrées du TFT -- cf. commentaire d'en-tête
-  de `main.cpp` pour le détail exact.
+  Session → Réglages (swipe tactile pour tourner l'anneau, tap direct
+  sur les listes -- plus de rotation physique depuis le retrait de
+  l'encodeur), pas le menu à 5 entrées du TFT -- cf. commentaire
+  d'en-tête de `main.cpp` pour le détail exact.
 
 ## Build
 
@@ -60,6 +63,55 @@ possibles à chaud via la page web `/circuits` (liste, ajout, édition,
 suppression, activation/désactivation -- persisté sur LittleFS) --
 `uploadfs` ne reste utile que pour repartir d'un jeu de circuits vierge
 sur une nouvelle carte.
+
+## Contrôles REC / arrêt d'enregistrement (27-28/07)
+
+Un même symptôme ("l'enregistrement redémarre tout seul") a nécessité
+plusieurs corrections successives, en réalité **deux bugs distincts et
+indépendants** :
+
+**1. Circuit jamais désarmé après un stop.** Une fois le circuit détecté
+une première fois (`courseManager` → `DETECT_STATE_DETECTED`), rien ne
+le réinitialisait à un simple `stopRecording()` -- le bouton REC restait
+donc actif indéfiniment tant qu'on restait dans le rayon de géofencing
+(15 km, `GEOFENCE_MAX_DISTANCE_M`), y compris des heures plus tard et
+loin de tout roulage. Corrigé par un écran de confirmation à deux
+temps, inspiré de RaceChrono :
+- **PUSH** pendant l'enregistrement → pause (fichier fermé, circuit
+  toujours armé), ouvre l'écran "Enregistrement en pause".
+- **PUSH** sur cet écran → reprend immédiatement.
+- **BACK** sur cet écran → arrêt définitif, désarme le circuit
+  (`activateAutoMode()`, reset complet du `courseManager`).
+- **Timeout de sécurité** (`CONFIRM_STOP_TIMEOUT_MS`, 5 min) : arrêt
+  définitif automatique si on ne choisit pas -- évite qu'un écran
+  oublié reste armé indéfiniment.
+- BACK sur l'écran Statut reste un simple retour au menu Circuit,
+  qu'un enregistrement soit en cours ou non (identique à TFT/OLED).
+
+**2. Faux contact tactile capacitif, confirmé au Serial** (traces du
+type `REC via tactile` déclenchées sans aucun contact humain, boîtier
+immobile). Reproductible à volonté, y compris après correction du bug
+n°1 -- donc bien une cause matérielle distincte, pas juste un symptôme
+du même bug. **Le rotatif EC11 a été physiquement retiré et remplacé
+par un simple bouton poussoir** (même broche, GPIO10) ; le tactile a
+été retiré de tout le chemin REC/pause/reprise (plus aucun widget
+cliquable sur l'écran Statut ni sur l'écran de confirmation -- juste du
+texte, "PRESS REC" / "PUSH pour reprendre"). Seuls PUSH et BACK
+(contacts mécaniques, insensibles au bruit électrique) contrôlent
+désormais l'enregistrement. Le tactile reste actif pour tout le reste
+(navigation anneau par swipe, sélection dans les listes par tap).
+
+**Piège annexe rencontré en cours de route** : un bug classique
+d'arithmétique non signée faisait échouer le timeout de l'écran de
+confirmation en quelques millisecondes au lieu de 5 minutes --
+`nowMs` était capturé une seule fois en haut de `loop()`, avant que
+`confirmStopEnteredMs` ne soit réglé plus tard dans la même itération
+(dans `handlePush()`), rendant `nowMs - confirmStopEnteredMs`
+techniquement négatif -- et donc, en `unsigned long`, un nombre énorme
+qui dépassait aussitôt le seuil. Fix : capturer un `millis()` frais au
+moment précis de la vérification plutôt que de réutiliser le `nowMs` du
+haut de la boucle. TFT/OLED n'ont jamais eu ce bug (ils utilisaient déjà
+un `millis()` frais à cet endroit).
 
 ## Pièges de compilation rencontrés
 
