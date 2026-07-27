@@ -1001,9 +1001,16 @@ enum ScreenState {
   SCREEN_SESSION_LIST, // liste des sessions du carnet, la plus recente en premier
   SCREEN_SESSION_LAPS, // detail des tours d'une session choisie
   SCREEN_SETTINGS,     // vide pour l'instant, juste un emplacement reserve
-  SCREEN_WIFI
+  SCREEN_WIFI,
+  SCREEN_CONFIRM_STOP  // pause avant arret definitif -- cf. discussion "faux contact en voiture"
 };
 static ScreenState screenState = SCREEN_STATUS;
+// Duree max sur SCREEN_CONFIRM_STOP avant arret definitif automatique --
+// filet de securite si on oublie de valider (BACK) ou de reprendre (PUSH)
+// en quittant la piste. Sans ca, l'ecran resterait arme indefiniment et un
+// faux contact pourrait relancer l'enregistrement (cf. bug du 27/07).
+static const unsigned long CONFIRM_STOP_TIMEOUT_MS = 120000UL; // 2 minutes
+static unsigned long confirmStopEnteredMs = 0;
 static int menuSelection = 0; // reutilise pour chaque sous-menu (le sens depend de screenState)
 
 // ----- Menu principal -----
@@ -1135,6 +1142,34 @@ static void drawStatusScreen() {
   if (recordingEnabled) {
     display.drawDisc(124, 4, 2); // petit point plein, coin haut droit
   }
+
+  display.sendBuffer();
+}
+
+// ===================== Confirmation d'arret (PUSH depuis le statut en enregistrement) =====================
+// Ecran intercalaire, a la RaceChrono : PUSH pendant l'enregistrement ne
+// stoppe plus directement, il ouvre cet ecran. REPRENDRE (PUSH) relance
+// aussitot (circuit toujours arme). BACK confirme l'arret definitif
+// (desarme le circuit). Timeout de securite si on oublie de choisir --
+// cf. CONFIRM_STOP_TIMEOUT_MS.
+static void drawConfirmStopScreen() {
+  display.clearBuffer();
+  display.setFont(u8g2_font_6x10_tf);
+  display.drawStr(0, 12, "En pause");
+
+  display.setFont(u8g2_font_7x14B_tf);
+  display.drawStr(0, 30, "REPRENDRE");
+
+  display.setFont(u8g2_font_6x10_tf);
+  display.drawStr(0, 42, "(PUSH)");
+
+  long remainingS = (long)(CONFIRM_STOP_TIMEOUT_MS - (millis() - confirmStopEnteredMs)) / 1000;
+  if (remainingS < 0) remainingS = 0;
+  char buf[24];
+  snprintf(buf, sizeof(buf), "Auto-stop %lds", remainingS);
+  display.drawStr(0, 54, buf);
+
+  display.drawStr(0, 63, "BACK: stop def.");
 
   display.sendBuffer();
 }
@@ -1904,7 +1939,18 @@ void loop() {
     // de l'encodeur, et le geste d'appui long n'etait pas franchement
     // decouvrable (rien a l'ecran ne l'indiquait).
     if (pushReleased) {
-      toggleRecording();
+      if (recordingEnabled) {
+        // PUSH ne stoppe plus directement -- passe par un ecran de
+        // confirmation (cf. SCREEN_CONFIRM_STOP). stopRecording() ici agit
+        // comme une pause : le fichier de log est ferme mais le circuit
+        // reste arme (courseManager pas reset), pour permettre une reprise
+        // rapide si c'etait un arret involontaire/entre deux runs.
+        stopRecording();
+        confirmStopEnteredMs = millis();
+        screenState = SCREEN_CONFIRM_STOP;
+      } else {
+        startRecording();
+      }
     }
     if (confirmReleased) {
       forceLapAnythingManually(); // cf. section dediee -- arme aussi la capture auto de nouveau circuit
@@ -1915,6 +1961,24 @@ void loop() {
       rotaryEncoder.setBoundaries(0, MAIN_MENU_COUNT - 1, true);
       rotaryEncoder.setEncoderValue(menuSelection);
       screenState = SCREEN_MAIN_MENU;
+    }
+
+  } else if (screenState == SCREEN_CONFIRM_STOP) {
+    if (pushReleased) {
+      // REPRENDRE -- le circuit etait toujours arme (pas de reset), donc
+      // startRecording() repart immediatement sans repasser par la detection.
+      startRecording();
+      screenState = SCREEN_STATUS;
+    }
+
+    bool timedOut = (millis() - confirmStopEnteredMs) >= CONFIRM_STOP_TIMEOUT_MS;
+    if (backReleased || timedOut) {
+      // Arret definitif : desarme le circuit (auto ou force manuellement)
+      // pour qu'aucun faux contact ne puisse relancer l'enregistrement une
+      // fois qu'on a quitte la piste. Le timeout couvre le cas ou on
+      // oublie de confirmer (BACK) avant de prendre la route.
+      activateAutoMode(); // reset complet du courseManager + des flags d'armement
+      screenState = SCREEN_STATUS;
     }
 
   } else if (screenState == SCREEN_MAIN_MENU) {
@@ -2030,6 +2094,7 @@ void loop() {
       case SCREEN_SESSION_LIST:  drawSessionListScreen(); break;
       case SCREEN_SESSION_LAPS:  drawSessionLapsScreen(); break;
       case SCREEN_SETTINGS:      drawSettingsScreen(); break;
+      case SCREEN_CONFIRM_STOP:  drawConfirmStopScreen(); break;
       default:                   drawWifiScreen(); break;
     }
   }

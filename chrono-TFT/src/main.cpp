@@ -1212,9 +1212,16 @@ enum ScreenState {
   SCREEN_SESSION_LIST,
   SCREEN_SESSION_LAPS,
   SCREEN_SETTINGS,
-  SCREEN_WIFI
+  SCREEN_WIFI,
+  SCREEN_CONFIRM_STOP // pause avant arret definitif -- cf. discussion "faux contact en voiture"
 };
 static ScreenState screenState = SCREEN_STATUS;
+// Duree max sur SCREEN_CONFIRM_STOP avant arret definitif automatique --
+// filet de securite si on oublie de valider (BACK) ou de reprendre (PUSH)
+// en quittant la piste. Sans ca, l'ecran resterait arme indefiniment et un
+// faux contact (vibrations, etc.) pourrait relancer l'enregistrement.
+static const unsigned long CONFIRM_STOP_TIMEOUT_MS = 120000UL; // 2 minutes
+static unsigned long confirmStopEnteredMs = 0;
 static int menuSelection = 0;      // reutilise pour le sous-menu Circuit (cf. plus bas)
 static int mainMenuSelection = 0;  // menu principal -- 0=Circuit, 1=Connexion, 2=Session, 3=Reglages, 4=New track (capture)
 static int sessionListSelection = 0;
@@ -1713,6 +1720,47 @@ static void drawStatusScreen() {
   canvas.setFont(NULL); // revient a la police par defaut -- les autres ecrans (menus...) ne doivent pas heriter de celle-ci (canvas est un objet unique, reutilise a chaque frame)
 }
 
+// ===================== Confirmation d'arret (PUSH depuis le statut en enregistrement) =====================
+// Ecran intercalaire, a la RaceChrono : PUSH pendant l'enregistrement ne
+// stoppe plus directement, il ouvre cet ecran. REPRENDRE (PUSH) relance
+// aussitot (circuit toujours arme). BACK confirme l'arret definitif
+// (desarme le circuit). Timeout de securite si on oublie de choisir --
+// cf. CONFIRM_STOP_TIMEOUT_MS.
+static void drawConfirmStopScreen() {
+  if (screenNeedsFullRedraw) {
+    canvas.fillScreen(ST77XX_BLACK);
+    screenNeedsFullRedraw = false;
+  }
+  canvas.setFont(NULL);
+  canvas.setTextSize(2);
+  canvas.setCursor(4, 6);
+  canvas.setTextColor(ST77XX_YELLOW, ST77XX_BLACK);
+  canvas.print("Enregistrement");
+  canvas.setCursor(4, 30);
+  canvas.print("en pause");
+
+  canvas.setTextSize(3);
+  canvas.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
+  canvas.setCursor(4, 90);
+  canvas.print("REPRENDRE");
+  canvas.setTextSize(1);
+  canvas.setCursor(4, 118);
+  canvas.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
+  canvas.print("(PUSH)");
+
+  long remainingS = (long)(CONFIRM_STOP_TIMEOUT_MS - (millis() - confirmStopEnteredMs)) / 1000;
+  if (remainingS < 0) remainingS = 0;
+  clearLine(150, STATUS_LINE_H_TINY);
+  canvas.setCursor(4, 150);
+  char buf[48];
+  snprintf(buf, sizeof(buf), "Arret auto dans %lds si rien", remainingS);
+  canvas.print(buf);
+
+  clearLine(canvas.height() - 15, STATUS_LINE_H_TINY);
+  canvas.setCursor(4, canvas.height() - 15);
+  canvas.print("BACK: stop definitif   PUSH: reprendre");
+}
+
 void loop() {
 #if GPS_ENABLED
   pollGps();
@@ -1736,7 +1784,20 @@ void loop() {
     }
 
     if (rotaryEncoder.isEncoderButtonClicked()) {
-      toggleRecording();
+      if (recordingEnabled) {
+        // PUSH ne stoppe plus directement -- passe par un ecran de
+        // confirmation (cf. SCREEN_CONFIRM_STOP). stopRecording() ici agit
+        // comme une pause : le fichier de log est ferme mais le circuit
+        // reste arme (courseManager pas reset), pour permettre une reprise
+        // rapide si c'etait un arret involontaire/entre deux runs.
+        stopRecording();
+        confirmStopEnteredMs = millis();
+        screenNeedsFullRedraw = true;
+        uiDirty = true;
+        screenState = SCREEN_CONFIRM_STOP;
+      } else {
+        startRecording();
+      }
     }
 
     if (pollBackPress()) {
@@ -1747,6 +1808,28 @@ void loop() {
       screenNeedsFullRedraw = true;
       uiDirty = true;
       screenState = SCREEN_MAIN_MENU;
+    }
+
+  } else if (screenState == SCREEN_CONFIRM_STOP) {
+    if (rotaryEncoder.isEncoderButtonClicked()) {
+      // REPRENDRE -- le circuit etait toujours arme (pas de reset), donc
+      // startRecording() repart immediatement sans repasser par la detection.
+      startRecording();
+      screenNeedsFullRedraw = true;
+      uiDirty = true;
+      screenState = SCREEN_STATUS;
+    }
+
+    bool timedOut = (millis() - confirmStopEnteredMs) >= CONFIRM_STOP_TIMEOUT_MS;
+    if (pollBackPress() || timedOut) {
+      // Arret definitif : desarme le circuit (auto ou force manuellement)
+      // pour qu'aucun faux contact ne puisse relancer l'enregistrement une
+      // fois qu'on a quitte la piste. Le timeout couvre le cas ou on
+      // oublie de confirmer (BACK) avant de prendre la route.
+      activateAutoMode(); // reset complet du courseManager + des flags d'armement
+      screenNeedsFullRedraw = true;
+      uiDirty = true;
+      screenState = SCREEN_STATUS;
     }
 
   } else if (screenState == SCREEN_MAIN_MENU) {
@@ -1889,7 +1972,8 @@ void loop() {
   // actions) : seulement si quelque chose a change (uiDirty) -- evite de
   // redessiner 4x/seconde un menu identique a la frame precedente,
   // source du clignotement residuel constate au banc.
-  bool isLiveScreen = (screenState == SCREEN_STATUS || screenState == SCREEN_CONNEXION);
+  bool isLiveScreen = (screenState == SCREEN_STATUS || screenState == SCREEN_CONNEXION ||
+                       screenState == SCREEN_CONFIRM_STOP); // decompte du timeout -- doit se rafraichir seul
   static unsigned long lastRender = 0;
   bool timeToRender = isLiveScreen && (millis() - lastRender >= 250);
   if (timeToRender || (!isLiveScreen && uiDirty)) {
@@ -1903,6 +1987,7 @@ void loop() {
       case SCREEN_SESSION_LIST: drawSessionListScreen(); break;
       case SCREEN_SESSION_LAPS: drawSessionLapsScreen(); break;
       case SCREEN_SETTINGS:     drawSettingsScreen(); break;
+      case SCREEN_CONFIRM_STOP: drawConfirmStopScreen(); break;
       default:                  drawWifiScreen(); break;
     }
     pushCanvasToDisplay(); // un seul envoi SPI complet, une fois l'ecran hors-ligne entierement compose

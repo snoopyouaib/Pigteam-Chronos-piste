@@ -821,8 +821,15 @@ static void handleSerialCommands() {
 
 // ===================== Navigation =====================
 
-enum AppScreen { SCR_STATUS, SCR_CIRCUIT, SCR_CONNEXION, SCR_SESSION_LIST, SCR_SESSION_LAPS, SCR_SETTINGS, SCR_WIFI, SCR_NEW_CIRCUIT };
+enum AppScreen { SCR_STATUS, SCR_CIRCUIT, SCR_CONNEXION, SCR_SESSION_LIST, SCR_SESSION_LAPS, SCR_SETTINGS, SCR_WIFI, SCR_NEW_CIRCUIT, SCR_CONFIRM_STOP };
 static AppScreen currentScreen = SCR_STATUS;
+// Duree max sur SCR_CONFIRM_STOP avant arret definitif automatique --
+// filet de securite si on oublie de valider (BACK) ou de reprendre
+// (tactile/PUSH) en quittant la piste. Sans ca, l'ecran resterait arme
+// indefiniment et un faux contact tactile pourrait relancer
+// l'enregistrement (cf. bug du 27/07 -- circuit jamais desarme apres stop).
+static const unsigned long CONFIRM_STOP_TIMEOUT_MS = 120000UL; // 2 minutes
+static unsigned long confirmStopEnteredMs = 0;
 static bool selectingMode = false; // true = encodeur en mode "selection dans la liste" (Circuit/Session/Reglages)
 
 static int ringIndex = 0;        // 0=Circuit,1=NouveauCircuit,2=Connexion,3=Session,4=Reglages
@@ -838,6 +845,7 @@ static lv_obj_t* scrSessionLaps;
 static lv_obj_t* scrSettings;
 static lv_obj_t* scrWifi;
 static lv_obj_t* scrNewCircuit;
+static lv_obj_t* scrConfirmStop;
 
 static bool screenDirty = true; // force un redessin complet au prochain refresh
 
@@ -868,6 +876,7 @@ static void goToScreen(AppScreen s) {
     case SCR_SETTINGS:     ringIndex = 4; lv_scr_load(scrSettings); setEncoderForRing(); break;
     case SCR_SESSION_LAPS: lv_scr_load(scrSessionLaps); break;
     case SCR_WIFI:         lv_scr_load(scrWifi); break;
+    case SCR_CONFIRM_STOP: lv_scr_load(scrConfirmStop); break;
   }
 }
 
@@ -983,6 +992,67 @@ static void buildStatusScreen() {
   lv_obj_set_style_text_font(lblTours, &lv_font_teko_medium_34, 0);
   lv_obj_set_style_text_color(lblTours, lv_color_white(), 0);
   lv_obj_align(lblTours, LV_ALIGN_BOTTOM_RIGHT, -4, -4);
+}
+
+// ===================== Confirmation d'arret (a la RaceChrono) =====================
+// BACK depuis SCR_STATUS pendant l'enregistrement ne stoppe plus
+// directement -- il ouvre cet ecran. Un tap sur REPRENDRE (ou le PUSH
+// encodeur, equivalent materiel) relance aussitot, le circuit etant reste
+// arme (courseManager pas reset par stopRecording()). BACK confirme
+// l'arret definitif (desarme le circuit, cf. handleBack()). Un timeout de
+// securite (CONFIRM_STOP_TIMEOUT_MS) confirme automatiquement l'arret si
+// on oublie de choisir avant de prendre la route -- cf. discussion sur le
+// faux contact tactile en voiture qui relancait l'enregistrement.
+static lv_obj_t* lblConfirmCountdown;
+
+static void btnReprendreClickedCb(lv_event_t* e) {
+  startRecording();
+  goToScreen(SCR_STATUS);
+}
+
+static void buildConfirmStopScreen() {
+  scrConfirmStop = lv_obj_create(NULL);
+  lv_obj_set_style_bg_color(scrConfirmStop, lv_color_black(), 0);
+  lv_obj_clear_flag(scrConfirmStop, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t* lblTitle = lv_label_create(scrConfirmStop);
+  lv_obj_set_style_text_font(lblTitle, &lv_font_teko_medium_34, 0);
+  lv_obj_set_style_text_color(lblTitle, lv_palette_main(LV_PALETTE_ORANGE), 0);
+  lv_label_set_text(lblTitle, "Enregistrement en pause");
+  lv_obj_align(lblTitle, LV_ALIGN_TOP_MID, 0, 20);
+
+  lv_obj_t* btnReprendre = lv_btn_create(scrConfirmStop);
+  lv_obj_set_size(btnReprendre, 320, 90);
+  lv_obj_set_style_bg_color(btnReprendre, lv_palette_main(LV_PALETTE_GREEN), 0);
+  lv_obj_set_style_bg_color(btnReprendre, lv_palette_darken(LV_PALETTE_GREEN, 2), LV_STATE_PRESSED);
+  lv_obj_set_style_radius(btnReprendre, 14, 0);
+  lv_obj_align(btnReprendre, LV_ALIGN_CENTER, 0, -10);
+  lv_obj_add_event_cb(btnReprendre, btnReprendreClickedCb, LV_EVENT_CLICKED, NULL);
+
+  lv_obj_t* lblBtnReprendre = lv_label_create(btnReprendre);
+  lv_obj_set_style_text_font(lblBtnReprendre, &lv_font_teko_bold_38, 0);
+  lv_obj_set_style_text_color(lblBtnReprendre, lv_color_white(), 0);
+  lv_label_set_text(lblBtnReprendre, "REPRENDRE");
+  lv_obj_center(lblBtnReprendre);
+
+  lv_obj_t* lblBack = lv_label_create(scrConfirmStop);
+  lv_obj_set_style_text_font(lblBack, &lv_font_teko_medium_26, 0);
+  lv_obj_set_style_text_color(lblBack, lv_color_white(), 0);
+  lv_label_set_text(lblBack, "PRESS BACK pour stop definitif");
+  lv_obj_align(lblBack, LV_ALIGN_CENTER, 0, 60);
+
+  lblConfirmCountdown = lv_label_create(scrConfirmStop);
+  lv_obj_set_style_text_font(lblConfirmCountdown, &lv_font_teko_medium_26, 0);
+  lv_obj_set_style_text_color(lblConfirmCountdown, lv_palette_main(LV_PALETTE_GREY), 0);
+  lv_obj_align(lblConfirmCountdown, LV_ALIGN_BOTTOM_MID, 0, -8);
+}
+
+static void refreshConfirmStopScreen() {
+  long remainingS = (long)(CONFIRM_STOP_TIMEOUT_MS - (millis() - confirmStopEnteredMs)) / 1000;
+  if (remainingS < 0) remainingS = 0;
+  char buf[32];
+  snprintf(buf, sizeof(buf), "Arret auto dans %lds", remainingS);
+  lv_label_set_text(lblConfirmCountdown, buf);
 }
 
 static void updateStatusScreen(unsigned long nowMs) {
@@ -1471,6 +1541,7 @@ static void refreshCurrentScreen(unsigned long nowMs) {
     case SCR_SETTINGS:     refreshSettingsScreen(); break;
     case SCR_WIFI:         refreshWifiScreen(); break;
     case SCR_NEW_CIRCUIT:  break; // statique, rien a rafraichir
+    case SCR_CONFIRM_STOP: refreshConfirmStopScreen(); break;
   }
   screenDirty = false;
 }
@@ -1512,6 +1583,12 @@ static void handlePush() {
       if (!recordingEnabled && detectionEffectivelyComplete()) { // BACK arrete desormais (pas PUSH), cf. handleBack
         startRecording();
       }
+      break;
+
+    case SCR_CONFIRM_STOP:
+      // Equivalent materiel du tap sur REPRENDRE -- cf. btnReprendreClickedCb.
+      startRecording();
+      goToScreen(SCR_STATUS);
       break;
 
     case SCR_CIRCUIT:
@@ -1568,11 +1645,27 @@ static void handleBack() {
   switch (currentScreen) {
     case SCR_STATUS:
       if (recordingEnabled) {
-        stopRecording(); // BACK arrete l'enregistrement (a la place de PUSH)
+        // BACK ne stoppe plus directement -- passe par un ecran de
+        // confirmation (cf. SCR_CONFIRM_STOP). stopRecording() ici agit
+        // comme une pause : le fichier de log est ferme mais le circuit
+        // reste arme (courseManager pas reset), pour permettre une reprise
+        // rapide si c'etait un arret involontaire/entre deux runs.
+        stopRecording();
+        confirmStopEnteredMs = millis();
+        goToScreen(SCR_CONFIRM_STOP);
       } else {
         cancelNewCircuitCapture(); // no-op si rien n'est arme
         goToScreen(SCR_CIRCUIT);
       }
+      break;
+
+    case SCR_CONFIRM_STOP:
+      // Arret definitif : desarme le circuit (auto ou force manuellement)
+      // pour qu'aucun faux contact ne puisse relancer l'enregistrement une
+      // fois qu'on a quitte la piste. Le timeout dans loop() couvre le cas
+      // ou on oublie de confirmer avant de prendre la route.
+      activateAutoMode(); // reset complet du courseManager + des flags d'armement
+      goToScreen(SCR_STATUS);
       break;
 
     case SCR_CIRCUIT:
@@ -1660,6 +1753,7 @@ void setup() {
     buildSettingsScreen();
     buildWifiScreen();
     buildNewCircuitScreen();
+    buildConfirmStopScreen();
     lvglUnlock();
   }
   Serial.println("[5/5] Ecrans construits, splash affiche");
@@ -1732,8 +1826,18 @@ void loop() {
     webServerManager.stopDownloadMode();
   }
 
+  if (currentScreen == SCR_CONFIRM_STOP &&
+      (nowMs - confirmStopEnteredMs) >= CONFIRM_STOP_TIMEOUT_MS) {
+    // Timeout de securite : personne n'a choisi (BACK ou REPRENDRE) --
+    // on confirme l'arret tout seul plutot que de laisser cet ecran arme
+    // indefiniment (cf. commentaire pres de CONFIRM_STOP_TIMEOUT_MS).
+    activateAutoMode();
+    goToScreen(SCR_STATUS);
+  }
+
   static unsigned long lastRender = 0;
-  bool isLiveScreen = (currentScreen == SCR_STATUS || currentScreen == SCR_CONNEXION);
+  bool isLiveScreen = (currentScreen == SCR_STATUS || currentScreen == SCR_CONNEXION ||
+                       currentScreen == SCR_CONFIRM_STOP); // decompte du timeout -- doit se rafraichir seul
   bool timeToRender = isLiveScreen && (nowMs - lastRender >= 250);
   if (timeToRender || screenDirty) {
     lastRender = nowMs;
