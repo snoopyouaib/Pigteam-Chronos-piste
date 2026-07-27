@@ -9,16 +9,17 @@
  * WebServerManager (WiFi/telechargement) pas encore integre -- prochaine
  * etape.
  *
- * Ecran + encodeur EC11 (PUSH uniquement, cf. ci-dessous) + bouton BACK.
+ * Ecran + bouton PUSH simple (rotatif EC11 retire le 27/07, remplace par
+ * un bouton poussoir simple sur la meme broche -- cf. commentaire pres de
+ * PUSH_BUTTON) + bouton BACK.
  *
  * Navigation (pas de menu liste separe) :
  *   - Depuis Statut : BACK -> ecran Circuit (1er ecran de l'anneau)
  *   - Anneau Circuit -> Nouveau circuit -> Connexion -> Session -> Reglages
- *     -> Circuit... (rotation encodeur ou swipe tactile)
- *   - Sur Circuit/Session/Reglages : PUSH entre en mode selection
- *     (l'encodeur change de role, selectionne un element de la liste),
+ *     -> Circuit... (swipe tactile uniquement depuis le retrait du rotatif)
+ *   - Sur Circuit/Session/Reglages : PUSH entre en mode selection,
  *     re-PUSH valide -- ou tap direct sur une ligne (equivalent en un
- *     seul geste).
+ *     seul geste, et desormais le moyen normal vu l'absence de rotation).
  *   - BACK depuis un ecran de l'anneau (hors mode selection) -> Statut.
  *   - BACK en mode selection -> annule, sort du mode selection (reste
  *     sur le meme ecran, anneau).
@@ -33,7 +34,6 @@
 
 #include <Arduino.h>
 #include <lvgl.h>
-#include <AiEsp32RotaryEncoder.h>
 #include <limits.h>
 #include <math.h>
 #include <vector>
@@ -52,24 +52,39 @@
 #include "WebServerManager.h"
 
 // ===================== Pins (valides au bring-up 1.91) =====================
-#define ENCODER_CLK   2
-#define ENCODER_DT    3
-#define ENCODER_PUSH  10
+// Rotatif physiquement retire (27/07) -- remplace par un bouton poussoir
+// simple sur la meme broche (ENCODER_CLK/DT ne sont plus cables). La
+// navigation anneau/listes, auparavant pilotee par la rotation, repose
+// desormais entierement sur le tactile (swipe pour l'anneau, tap direct
+// pour les listes -- deja fonctionnel en parallele avant ce changement,
+// cf. ringScreenGestureCb() et les commentaires "Tap: choisir").
+#define PUSH_BUTTON   10
 #define BACK_BUTTON   14
 
-AiEsp32RotaryEncoder rotaryEncoder = AiEsp32RotaryEncoder(ENCODER_DT, ENCODER_CLK, ENCODER_PUSH, -1, 4);
 volatile bool backButtonPressed = false;
 static unsigned long lastBackIsrMs = 0;
-static const unsigned long BACK_DEBOUNCE_MS = 200;
+// Porte a 500ms (28/07, etait 200ms) : rebond/bruit constate sur BACK
+// juste apres le retrait du rotatif -- un vrai double-appui volontaire ne
+// se produit jamais en moins d'une demi-seconde, donc aucune perte de
+// reactivite percue. A verifier aussi cote materiel (soudure/connecteur
+// deranges en manipulant a cote pendant le remplacement du rotatif).
+static const unsigned long BACK_DEBOUNCE_MS = 500;
 
-void IRAM_ATTR readEncoderISR() {
-  rotaryEncoder.readEncoder_ISR();
-}
+volatile bool pushButtonPressed = false;
+static unsigned long lastPushIsrMs = 0;
+static const unsigned long PUSH_DEBOUNCE_MS = 200;
+
 void IRAM_ATTR backButtonISR() {
   unsigned long now = millis();
   if (now - lastBackIsrMs < BACK_DEBOUNCE_MS) return;
   lastBackIsrMs = now;
   backButtonPressed = true;
+}
+void IRAM_ATTR pushButtonISR() {
+  unsigned long now = millis();
+  if (now - lastPushIsrMs < PUSH_DEBOUNCE_MS) return;
+  lastPushIsrMs = now;
+  pushButtonPressed = true;
 }
 
 // mm:ss.mmm
@@ -828,7 +843,7 @@ static AppScreen currentScreen = SCR_STATUS;
 // (tactile/PUSH) en quittant la piste. Sans ca, l'ecran resterait arme
 // indefiniment et un faux contact tactile pourrait relancer
 // l'enregistrement (cf. bug du 27/07 -- circuit jamais desarme apres stop).
-static const unsigned long CONFIRM_STOP_TIMEOUT_MS = 120000UL; // 2 minutes
+static const unsigned long CONFIRM_STOP_TIMEOUT_MS = 300000UL; // 5 minutes
 static unsigned long confirmStopEnteredMs = 0;
 // Faux contact electrique (bruit sur l'alim, pas forcement un vrai doigt)
 // = evenement quasi instantane. Un vrai choix humain de REPRENDRE prend
@@ -846,7 +861,7 @@ static const unsigned long CONFIRM_STOP_INPUT_GRACE_MS = 600UL;
 // definitif, en plus de la protection REPRENDRE ci-dessus.
 static unsigned long lastDefinitiveStopMs = 0;
 static const unsigned long STATUS_REC_GRACE_AFTER_STOP_MS = 1500UL;
-static bool selectingMode = false; // true = encodeur en mode "selection dans la liste" (Circuit/Session/Reglages)
+static bool selectingMode = false; // true = mode "selection dans la liste" (Circuit/Session/Reglages), arme par PUSH
 
 static int ringIndex = 0;        // 0=Circuit,1=NouveauCircuit,2=Connexion,3=Session,4=Reglages
 static int circuitSelection = 0; // 0=Auto, 1..N=courses (plus de "Nouveau circuit" ici, ecran dedie desormais)
@@ -875,8 +890,8 @@ static bool wifiStartRequested = false;
 static bool wifiStopRequested = false;
 
 static void setEncoderForRing() {
-  rotaryEncoder.setBoundaries(0, 4, true);
-  rotaryEncoder.setEncoderValue(ringIndex);
+  // No-op depuis le retrait du rotatif (27/07) -- gardee pour ne pas
+  // toucher aux appels dans goToScreen(), l'anneau se navigue au swipe.
 }
 
 static void goToScreen(AppScreen s) {
@@ -898,7 +913,7 @@ static void goToScreen(AppScreen s) {
 
 static void goToRingScreen(int idx) {
   // idx: 0=Circuit,1=NouveauCircuit,2=Connexion,3=Session,4=Reglages --
-  // appele quand l'encodeur tourne pour changer d'ecran dans l'anneau
+  // appele au swipe pour changer d'ecran dans l'anneau (rotatif retire)
   // (hors mode selection).
   switch (idx) {
     case 0: goToScreen(SCR_CIRCUIT); break;
@@ -910,7 +925,7 @@ static void goToRingScreen(int idx) {
 }
 
 // Glissement gauche/droite sur un ecran de l'anneau -- change d'ecran,
-// en complement de la rotation encodeur. Ignore en mode selection
+// seul mecanisme de navigation de l'anneau depuis le retrait du rotatif. Ignore en mode selection
 // (meme logique que la rotation : pas de changement d'ecran quand on
 // est en train de choisir un element dans une liste).
 static void ringScreenGestureCb(lv_event_t* e) {
@@ -939,20 +954,10 @@ static lv_obj_t* lblRec;
 static lv_obj_t* lblBatt;
 static lv_obj_t* lblBig;
 static lv_obj_t* lblClock;
-static lv_obj_t* btnRec;
-static lv_obj_t* lblBtnRecText;
+static lv_obj_t* lblRecHint; // "PRESS REC", cf. commentaire pres de sa creation
 static lv_obj_t* lblDernier;
 static lv_obj_t* lblBest;
 static lv_obj_t* lblTours;
-
-// Tap sur le bouton REC (visible uniquement en mode "circuit detecte") --
-// equivalent tactile du PUSH encodeur pour cette transition precise.
-static void btnRecClickedCb(lv_event_t* e) {
-  if (millis() - lastDefinitiveStopMs < STATUS_REC_GRACE_AFTER_STOP_MS) return; // cf. commentaire pres de la constante
-  if (detectionEffectivelyComplete() && !recordingEnabled) {
-    startRecording();
-  }
-}
 
 static void buildStatusScreen() {
   scrStatus = lv_obj_create(NULL);
@@ -982,18 +987,17 @@ static void buildStatusScreen() {
   lv_obj_set_style_text_font(lblClock, &lv_font_teko_bold_56, 0); // taille intermediaire (etait bold_84, trop gros)
   lv_obj_set_style_text_color(lblClock, lv_color_white(), 0);
 
-  btnRec = lv_btn_create(scrStatus);
-  lv_obj_set_size(btnRec, 220, 70);
-  lv_obj_set_style_bg_color(btnRec, lv_palette_main(LV_PALETTE_RED), 0);
-  lv_obj_set_style_bg_color(btnRec, lv_palette_darken(LV_PALETTE_RED, 2), LV_STATE_PRESSED); // retour visuel a l'appui
-  lv_obj_set_style_radius(btnRec, 14, 0);
-  lv_obj_add_event_cb(btnRec, btnRecClickedCb, LV_EVENT_CLICKED, NULL);
-
-  lblBtnRecText = lv_label_create(btnRec);
-  lv_obj_set_style_text_font(lblBtnRecText, &lv_font_teko_bold_38, 0);
-  lv_obj_set_style_text_color(lblBtnRecText, lv_color_white(), 0);
-  lv_label_set_text(lblBtnRecText, "REC");
-  lv_obj_center(lblBtnRecText);
+  // Tactile retire (28/07, soir) -- theorie confirmee par un test dedie :
+  // 2 redemarrages fantomes avec la trace "[trigger] REC via tactile" en
+  // quelques minutes, sans aucun contact humain, alors meme que le bug
+  // d'underflow independant etait deja corrige. Faux contact capacitif
+  // confirme comme cause reelle et distincte -- cf. discussion du 28/07.
+  // Seul le PUSH (bouton simple, contact mecanique, insensible au bruit
+  // electrique) demarre l'enregistrement -- cf. handlePush()/SCR_STATUS.
+  lblRecHint = lv_label_create(scrStatus);
+  lv_obj_set_style_text_font(lblRecHint, &lv_font_teko_bold_38, 0);
+  lv_obj_set_style_text_color(lblRecHint, lv_palette_main(LV_PALETTE_RED), 0);
+  lv_label_set_text(lblRecHint, "PRESS REC");
 
   lblDernier = lv_label_create(scrStatus);
   lv_obj_set_style_text_font(lblDernier, &lv_font_teko_medium_34, 0);
@@ -1013,20 +1017,15 @@ static void buildStatusScreen() {
 
 // ===================== Confirmation d'arret (a la RaceChrono) =====================
 // BACK depuis SCR_STATUS pendant l'enregistrement ne stoppe plus
-// directement -- il ouvre cet ecran. Un tap sur REPRENDRE (ou le PUSH
-// encodeur, equivalent materiel) relance aussitot, le circuit etant reste
-// arme (courseManager pas reset par stopRecording()). BACK confirme
-// l'arret definitif (desarme le circuit, cf. handleBack()). Un timeout de
-// securite (CONFIRM_STOP_TIMEOUT_MS) confirme automatiquement l'arret si
-// on oublie de choisir avant de prendre la route -- cf. discussion sur le
-// faux contact tactile en voiture qui relancait l'enregistrement.
+// directement -- il ouvre cet ecran. Le PUSH relance aussitot, le
+// circuit etant reste arme (courseManager pas reset par stopRecording()).
+// BACK confirme l'arret definitif (desarme le circuit, cf. handleBack()).
+// Un timeout de securite (CONFIRM_STOP_TIMEOUT_MS) confirme automatiquement
+// l'arret si on oublie de choisir avant de prendre la route. Aucun bouton
+// tactile REPRENDRE (28/07) : preuve au Serial d'un faux contact capacitif
+// declenchant l'enregistrement seul -- cf. commentaire pres de lblRecHint
+// dans buildStatusScreen().
 static lv_obj_t* lblConfirmCountdown;
-
-static void btnReprendreClickedCb(lv_event_t* e) {
-  if (millis() - confirmStopEnteredMs < CONFIRM_STOP_INPUT_GRACE_MS) return; // cf. commentaire pres de la constante
-  startRecording();
-  goToScreen(SCR_STATUS);
-}
 
 static void buildConfirmStopScreen() {
   scrConfirmStop = lv_obj_create(NULL);
@@ -1039,19 +1038,15 @@ static void buildConfirmStopScreen() {
   lv_label_set_text(lblTitle, "Enregistrement en pause");
   lv_obj_align(lblTitle, LV_ALIGN_TOP_MID, 0, 20);
 
-  lv_obj_t* btnReprendre = lv_btn_create(scrConfirmStop);
-  lv_obj_set_size(btnReprendre, 320, 90);
-  lv_obj_set_style_bg_color(btnReprendre, lv_palette_main(LV_PALETTE_GREEN), 0);
-  lv_obj_set_style_bg_color(btnReprendre, lv_palette_darken(LV_PALETTE_GREEN, 2), LV_STATE_PRESSED);
-  lv_obj_set_style_radius(btnReprendre, 14, 0);
-  lv_obj_align(btnReprendre, LV_ALIGN_CENTER, 0, -10);
-  lv_obj_add_event_cb(btnReprendre, btnReprendreClickedCb, LV_EVENT_CLICKED, NULL);
-
-  lv_obj_t* lblBtnReprendre = lv_label_create(btnReprendre);
-  lv_obj_set_style_text_font(lblBtnReprendre, &lv_font_teko_bold_38, 0);
-  lv_obj_set_style_text_color(lblBtnReprendre, lv_color_white(), 0);
-  lv_label_set_text(lblBtnReprendre, "REPRENDRE");
-  lv_obj_center(lblBtnReprendre);
+  // Pas de widget bouton ici (28/07) -- meme raison que lblRecHint, cf.
+  // commentaire pres de sa creation dans buildStatusScreen(). Simple
+  // texte d'etat, seul le PUSH declenche la reprise -- cf.
+  // handlePush()/SCR_CONFIRM_STOP.
+  lv_obj_t* lblReprendre = lv_label_create(scrConfirmStop);
+  lv_obj_set_style_text_font(lblReprendre, &lv_font_teko_bold_38, 0);
+  lv_obj_set_style_text_color(lblReprendre, lv_palette_main(LV_PALETTE_GREEN), 0);
+  lv_label_set_text(lblReprendre, "PUSH pour reprendre");
+  lv_obj_align(lblReprendre, LV_ALIGN_CENTER, 0, -10);
 
   lv_obj_t* lblBack = lv_label_create(scrConfirmStop);
   lv_obj_set_style_text_font(lblBack, &lv_font_teko_medium_26, 0);
@@ -1111,10 +1106,10 @@ static void updateStatusScreen(unsigned long nowMs) {
     lv_obj_clear_flag(lblClock, LV_OBJ_FLAG_HIDDEN);
 
     if (circuitDetected) {
-      lv_obj_align(btnRec, LV_ALIGN_BOTTOM_RIGHT, -4, -4);
-      lv_obj_clear_flag(btnRec, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_align(lblRecHint, LV_ALIGN_BOTTOM_RIGHT, -4, -4);
+      lv_obj_clear_flag(lblRecHint, LV_OBJ_FLAG_HIDDEN);
     } else {
-      lv_obj_add_flag(btnRec, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_add_flag(lblRecHint, LV_OBJ_FLAG_HIDDEN);
     }
 
     lv_obj_add_flag(lblDernier, LV_OBJ_FLAG_HIDDEN);
@@ -1148,7 +1143,7 @@ static void updateStatusScreen(unsigned long nowMs) {
     lv_obj_clear_flag(lblTours, LV_OBJ_FLAG_HIDDEN);
 
     lv_obj_add_flag(lblClock, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(btnRec, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(lblRecHint, LV_OBJ_FLAG_HIDDEN);
   }
 }
 
@@ -1370,8 +1365,6 @@ static std::vector<LapDetail> lapListCache;
 // Factorisee -- utilisee a la fois par handleBack() (bouton physique)
 // et par le nouveau bouton tactile de retour (haut droite de l'ecran).
 static void backFromSessionLapsToList() {
-  rotaryEncoder.setBoundaries(0, (int)sessionListCache.size() - 1, false);
-  rotaryEncoder.setEncoderValue(sessionListSelection);
   goToScreen(SCR_SESSION_LIST); // remet selectingMode a false en interne
   selectingMode = true;         // on veut rester en mode selection sur la liste des sessions
   screenDirty = true;
@@ -1567,7 +1560,7 @@ static void refreshCurrentScreen(unsigned long nowMs) {
 // ===================== Gestion PUSH / BACK selon l'ecran courant =====================
 
 // Applique la selection d'un item Circuit (index i) -- factorise pour
-// etre appelee aussi bien par la validation PUSH (2 temps, encodeur)
+// etre appelee aussi bien par la validation PUSH (2 temps)
 // que par un tap direct sur une ligne (1 temps, tactile).
 static void applyCircuitSelection(int i) {
   if (i == 0) {
@@ -1587,10 +1580,6 @@ static void applyCircuitSelection(int i) {
 static void openSessionLaps(int i) {
   sessionListSelection = i;
   sessionLapSelection = 0;
-  const SessionSummary* s = selectedSession();
-  int lapCount = s ? s->lapCount : 0;
-  rotaryEncoder.setBoundaries(0, lapCount > 0 ? lapCount - 1 : 0, false);
-  rotaryEncoder.setEncoderValue(0);
   goToScreen(SCR_SESSION_LAPS);
   screenDirty = true;
 }
@@ -1598,14 +1587,24 @@ static void openSessionLaps(int i) {
 static void handlePush() {
   switch (currentScreen) {
     case SCR_STATUS:
+      if (recordingEnabled) {
+        // Option 1 (comme sur TFT) : PUSH met en pause pendant
+        // l'enregistrement -- pas BACK. stopRecording() ici agit comme une
+        // pause : le fichier de log est ferme mais le circuit reste arme
+        // (courseManager pas reset), pour permettre une reprise rapide.
+        stopRecording();
+        confirmStopEnteredMs = millis();
+        goToScreen(SCR_CONFIRM_STOP);
+        break;
+      }
       if (millis() - lastDefinitiveStopMs < STATUS_REC_GRACE_AFTER_STOP_MS) break; // cf. commentaire pres de la constante
-      if (!recordingEnabled && detectionEffectivelyComplete()) { // BACK arrete desormais (pas PUSH), cf. handleBack
+      if (detectionEffectivelyComplete()) {
         startRecording();
       }
       break;
 
     case SCR_CONFIRM_STOP:
-      // Equivalent materiel du tap sur REPRENDRE -- cf. btnReprendreClickedCb.
+      // Seule voie de reprise desormais (tactile retire, cf. buildConfirmStopScreen()).
       if (millis() - confirmStopEnteredMs < CONFIRM_STOP_INPUT_GRACE_MS) break; // cf. commentaire pres de la constante
       startRecording();
       goToScreen(SCR_STATUS);
@@ -1614,11 +1613,9 @@ static void handlePush() {
     case SCR_CIRCUIT:
       if (!selectingMode) {
         selectingMode = true;
-        rotaryEncoder.setBoundaries(0, myTracks.courseCount, true);
-        rotaryEncoder.setEncoderValue(circuitSelection);
         screenDirty = true;
       } else {
-        applyCircuitSelection(circuitSelection); // valide la selection encodeur (2e PUSH)
+        applyCircuitSelection(circuitSelection); // valide la selection (2e PUSH) -- cf. tap direct, alternative equivalente
       }
       break;
 
@@ -1629,8 +1626,6 @@ static void handlePush() {
       if (!sessionListCache.empty()) {
         if (!selectingMode) {
           selectingMode = true;
-          rotaryEncoder.setBoundaries(0, (int)sessionListCache.size() - 1, false);
-          rotaryEncoder.setEncoderValue(sessionListSelection);
         } else {
           openSessionLaps(sessionListSelection);
         }
@@ -1644,7 +1639,6 @@ static void handlePush() {
     case SCR_SETTINGS:
       if (!selectingMode) {
         selectingMode = true;
-        rotaryEncoder.setBoundaries(0, 0, false);
       } else {
         selectingMode = false;
         wifiStartRequested = true; // traite dans loop(), pas ici
@@ -1664,19 +1658,12 @@ static void handlePush() {
 static void handleBack() {
   switch (currentScreen) {
     case SCR_STATUS:
-      if (recordingEnabled) {
-        // BACK ne stoppe plus directement -- passe par un ecran de
-        // confirmation (cf. SCR_CONFIRM_STOP). stopRecording() ici agit
-        // comme une pause : le fichier de log est ferme mais le circuit
-        // reste arme (courseManager pas reset), pour permettre une reprise
-        // rapide si c'etait un arret involontaire/entre deux runs.
-        stopRecording();
-        confirmStopEnteredMs = millis();
-        goToScreen(SCR_CONFIRM_STOP);
-      } else {
-        cancelNewCircuitCapture(); // no-op si rien n'est arme
-        goToScreen(SCR_CIRCUIT);
-      }
+      // Option 1 (comme sur TFT) : BACK ne met plus en pause -- c'est le
+      // role de PUSH desormais (cf. handlePush()). BACK reste le simple
+      // retour au menu Circuit, meme pendant un enregistrement en cours
+      // (comportement identique a TFT/OLED sur ce point).
+      cancelNewCircuitCapture(); // no-op si rien n'est arme
+      goToScreen(SCR_CIRCUIT);
       break;
 
     case SCR_CONFIRM_STOP:
@@ -1750,13 +1737,9 @@ void setup() {
 
   pinMode(BACK_BUTTON, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(BACK_BUTTON), backButtonISR, FALLING);
-  pinMode(ENCODER_CLK, INPUT_PULLUP);
-  pinMode(ENCODER_DT, INPUT_PULLUP);
-  rotaryEncoder.begin();
-  rotaryEncoder.setup(readEncoderISR);
-  rotaryEncoder.setBoundaries(0, 100, false);
-  rotaryEncoder.setAcceleration(0);
-  Serial.println("[4/5] Encodeur + BACK ok");
+  pinMode(PUSH_BUTTON, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(PUSH_BUTTON), pushButtonISR, FALLING);
+  Serial.println("[4/5] PUSH + BACK ok");
 
   if (lvglLock(-1)) {
     lv_obj_t* scrSplash = lv_obj_create(NULL);
@@ -1786,7 +1769,7 @@ void setup() {
     lvglUnlock();
   }
 
-  Serial.println("Pret. Statut: PUSH avance (recherche->detecte->REC), BACK arrete le REC ou va sur Circuit. Anneau: tourne = change d'ecran, PUSH = selection, BACK = retour.");
+  Serial.println("Pret. Statut: PUSH avance (recherche->detecte->REC), BACK arrete le REC ou va sur Circuit. Anneau: swipe = change d'ecran, tap = selection, BACK = retour.");
   printSerialCommandsHelp();
 }
 
@@ -1809,29 +1792,21 @@ void loop() {
   }
 
   if (lvglLock(10)) {
-    if (rotaryEncoder.isEncoderButtonClicked()) {
+    if (pushButtonPressed) {
+      pushButtonPressed = false;
       handlePush();
     }
     if (backButtonPressed) {
       backButtonPressed = false;
       handleBack();
     }
-    if (rotaryEncoder.encoderChanged()) {
-      int val = rotaryEncoder.readEncoder();
-      if (!selectingMode && (currentScreen == SCR_CIRCUIT || currentScreen == SCR_CONNEXION ||
-                             currentScreen == SCR_SESSION_LIST || currentScreen == SCR_SETTINGS)) {
-        goToRingScreen(val);
-      } else if (selectingMode && currentScreen == SCR_CIRCUIT) {
-        circuitSelection = val;
-        screenDirty = true;
-      } else if (selectingMode && currentScreen == SCR_SESSION_LIST) {
-        sessionListSelection = val;
-        screenDirty = true;
-      } else if (currentScreen == SCR_SESSION_LAPS) {
-        sessionLapSelection = val;
-        screenDirty = true;
-      }
-    }
+    // Rotation retiree avec le rotatif physique (27/07) -- l'anneau
+    // (Circuit/Connexion/Session/Reglages) se navigue desormais par swipe
+    // (cf. ringScreenGestureCb()), et la selection dans les listes par tap
+    // direct (cf. commentaires "Tap: choisir" pres de chaque liste). Rien
+    // ne remplace la mise en surbrillance par selection de
+    // SCR_SESSION_LAPS (sessionLapSelection) -- ecran deja scrollable au
+    // tactile (LV_DIR_VER), simple perte de confort, pas de blocage.
     lvglUnlock();
   }
 
@@ -1847,14 +1822,28 @@ void loop() {
     webServerManager.stopDownloadMode();
   }
 
-  if (currentScreen == SCR_CONFIRM_STOP &&
-      (nowMs - confirmStopEnteredMs) >= CONFIRM_STOP_TIMEOUT_MS) {
-    // Timeout de securite : personne n'a choisi (BACK ou REPRENDRE) --
-    // on confirme l'arret tout seul plutot que de laisser cet ecran arme
-    // indefiniment (cf. commentaire pres de CONFIRM_STOP_TIMEOUT_MS).
-    activateAutoMode();
-    lastDefinitiveStopMs = nowMs; // cf. STATUS_REC_GRACE_AFTER_STOP_MS -- le geofencing peut rearmer le circuit en ~1s
-    goToScreen(SCR_STATUS);
+  if (currentScreen == SCR_CONFIRM_STOP) {
+    // BUG CORRIGE (28/07) : nowMs est capture UNE FOIS en haut de loop(),
+    // avant tout traitement de bouton. Si on entre sur SCR_CONFIRM_STOP
+    // dans CETTE MEME iteration (confirmStopEnteredMs = millis() appele
+    // plus tard, dans handlePush()), confirmStopEnteredMs peut alors etre
+    // *posterieur* a nowMs. Comme ce sont des unsigned long, nowMs -
+    // confirmStopEnteredMs ne devient pas negatif mais boucle par en
+    // dessous (~4 milliards), ce qui depasse instantanement
+    // CONFIRM_STOP_TIMEOUT_MS et confirme l'arret en quelques ms au lieu
+    // de 2 minutes -- cause reelle de tous les "ca va trop vite pour etre
+    // vu" observes, quel que soit le bouton implique. Fix : capturer un
+    // millis() frais ici, strictement posterieur ou egal a
+    // confirmStopEnteredMs puisque le temps ne remonte jamais.
+    unsigned long nowCheck = millis();
+    if (nowCheck - confirmStopEnteredMs >= CONFIRM_STOP_TIMEOUT_MS) {
+      // Timeout de securite : personne n'a choisi (BACK ou REPRENDRE) --
+      // on confirme l'arret tout seul plutot que de laisser cet ecran arme
+      // indefiniment (cf. commentaire pres de CONFIRM_STOP_TIMEOUT_MS).
+      activateAutoMode();
+      lastDefinitiveStopMs = nowCheck; // cf. STATUS_REC_GRACE_AFTER_STOP_MS -- le geofencing peut rearmer le circuit en ~1s
+      goToScreen(SCR_STATUS);
+    }
   }
 
   static unsigned long lastRender = 0;

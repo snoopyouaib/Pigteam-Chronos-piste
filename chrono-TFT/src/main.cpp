@@ -1220,7 +1220,7 @@ static ScreenState screenState = SCREEN_STATUS;
 // filet de securite si on oublie de valider (BACK) ou de reprendre (PUSH)
 // en quittant la piste. Sans ca, l'ecran resterait arme indefiniment et un
 // faux contact (vibrations, etc.) pourrait relancer l'enregistrement.
-static const unsigned long CONFIRM_STOP_TIMEOUT_MS = 120000UL; // 2 minutes
+static const unsigned long CONFIRM_STOP_TIMEOUT_MS = 300000UL; // 5 minutes
 static unsigned long confirmStopEnteredMs = 0;
 // Faux contact electrique = evenement quasi instantane. Un vrai choix
 // humain de REPRENDRE prend toujours au moins quelques centaines de ms de
