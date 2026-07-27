@@ -17,7 +17,7 @@ batterie, stockage SD réels). **Compile et tourne sur le vrai board**
 | Sessions (`/sessions.csv`, LittleFS) | ✅ réel |
 | Batterie (ADC interne) | ✅ réel |
 | Stockage SD (`SdLogStorage`, SDMMC) | ✅ réel |
-| WebServerManager (WiFi/téléchargement) | ⏳ pas encore intégré -- écran WiFi encore factice |
+| WebServerManager (WiFi, sessions, sauvegarde/restauration, OTA) | ✅ réel |
 
 ## CourseManager -- vendoré depuis DovesLapTimer
 
@@ -55,9 +55,11 @@ pio run -t upload      # flashe le firmware
 ```
 
 `data/circuits.csv` = copie directe du fichier réel fourni (8 circuits
-PIGTEAM). Pour en ajouter/modifier, éditer ce fichier puis refaire
-`uploadfs` (pas encore de page web `/circuits` pour l'éditer à chaud --
-viendra avec le portage de `WebServerManager`).
+PIGTEAM), utilisée pour le tout premier boot. Modifications ultérieures
+possibles à chaud via la page web `/circuits` (liste, ajout, édition,
+suppression, activation/désactivation -- persisté sur LittleFS) --
+`uploadfs` ne reste utile que pour repartir d'un jeu de circuits vierge
+sur une nouvelle carte.
 
 ## Pièges de compilation rencontrés
 
@@ -141,10 +143,13 @@ Serial. Deux causes distinctes traitées :
 
 ## Prochaines étapes
 
-- Intégrer `WebServerManager` (pages Sessions/Comparer/Circuits/Statut/
-  Firmware -- OTA) -- reçu du projet TFT, pas encore branché.
-- Page web `/circuits` pour éditer `circuits.csv` à chaud (actuellement
-  uniquement modifiable via `uploadfs`).
+- Page web `/circuits` pour éditer `circuits.csv` à chaud : ✅ fait,
+  cf. section Build ci-dessus.
+- Isoler formellement la cause du bug mémoire de `WebServerManager.cpp`
+  (`loadLapsForSession()`, cf. section "Pièges de compilation" point 3)
+  via JTAG (`debug_tool`/`debug_init_break` déjà en place dans
+  `platformio.ini`) -- contourné pour l'instant (tableau détail-par-tour
+  retiré de la page d'accueil), jamais réellement corrigé.
 - Tester en conditions réelles (roulage) : géofencing, détection de
   ligne, capture de nouveau circuit -- tout ça n'a été porté que par
   lecture de code, jamais testé sur GPS réel en mouvement à ce stade.
