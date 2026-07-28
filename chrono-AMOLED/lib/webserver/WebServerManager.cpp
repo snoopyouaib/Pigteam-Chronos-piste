@@ -1091,12 +1091,11 @@ static void handleLapTracePage() {
   // DIRECTEMENT par le firmware dans /sessions.csv (11 champs au lieu de
   // 6/7, cf. checkLapCompletion() dans main.cpp) -- affichees telles
   // quelles, sans aucun calcul supplementaire ni requete vers le log GPS
-  // detaille. Le fetch+parsing cote navigateur (ancien seul moyen de les
-  // obtenir) est conserve UNIQUEMENT en repli pour les sessions plus
-  // anciennes encore au format 6/7 champs (idx<11 ci-dessous) -- il ne
-  // s'execute meme plus du tout des qu'une session est entierement au
-  // nouveau format, ce qui reduit d'autant le risque lie au pattern
-  // "gros bloc JS" historiquement implique dans la corruption de tas.
+  // detaille. Pour les sessions plus anciennes encore au format 6/7
+  // champs (idx<11 ci-dessous), ces colonnes affichent simplement "--" :
+  // l'ancien repli par fetch+parsing JS du log detaille a ete retire
+  // (plus de <script> du tout sur cette page desormais) pour alleger la
+  // page et couper court a tout risque residuel lie a ce pattern.
   String compactKey = compactKeyFromLogFilename("/" + file);
 
   // ----- Passe 1 : meilleur temps de la session (scalaire uniquement) -----
@@ -1147,14 +1146,6 @@ static void handleLapTracePage() {
   httpServer.sendContent(html);
   html = "";
 
-  // Accumule au fil du streaming la liste (courte, uniquement des
-  // entiers) des numeros de tour valides -- necessaire au script de fin
-  // de page pour savoir quels tours remplir. Une String de quelques
-  // dizaines d'octets meme avec 30-40 tours, sans rapport avec le
-  // pattern qui posait probleme (pas de conteneur d'objets/String
-  // copies, juste une concatenation de chiffres).
-  String lapNumbersJs = "";
-
   File f = LittleFS.open(g_sessionLogPath, "r");
   bool anyLap = false;
   if (f) {
@@ -1203,15 +1194,15 @@ static void handleLapTracePage() {
           row += "<td style='padding:4px 8px'>" + (fld[7].length() ? fld[7] + " km/h" : "--") + "</td>";
           row += "<td style='padding:4px 8px'>" + (fld[8].length() ? fld[8] + " km/h" : "--") + "</td>";
         } else {
-          // Session anterieure au 11e champ -- repli sur le calcul cote
-          // navigateur (log GPS detaille), cf. script en fin de page.
-          row += "<td style='padding:4px 8px' id='start-" + n + "'>...</td>";
-          row += "<td style='padding:4px 8px' id='dist-" + n + "'>...</td>";
-          row += "<td style='padding:4px 8px' id='vmax-" + n + "'>...</td>";
-          row += "<td style='padding:4px 8px' id='vmin-" + n + "'>...</td>";
-          row += "<td style='padding:4px 8px' id='vavg-" + n + "'>...</td>";
-          if (lapNumbersJs.length() > 0) lapNumbersJs += ",";
-          lapNumbersJs += n;
+          // Session anterieure au 11e champ -- rien a afficher, plus de
+          // calcul de repli cote navigateur (retire pour alleger la
+          // page : plus de fetch/parsing JS du tout, meme pour ces
+          // vieilles sessions).
+          row += "<td style='padding:4px 8px'>--</td>";
+          row += "<td style='padding:4px 8px'>--</td>";
+          row += "<td style='padding:4px 8px'>--</td>";
+          row += "<td style='padding:4px 8px'>--</td>";
+          row += "<td style='padding:4px 8px'>--</td>";
         }
         row += "<td style='padding:4px 8px'>" + fld[5] + "</td></tr>";
         httpServer.sendContent(row); // une ligne a la fois -- jamais accumulee
@@ -1225,113 +1216,6 @@ static void handleLapTracePage() {
   html += "<p style='margin-top:12px'><a class='file' href='/download?file=" + file + "'>&#8681; Telecharger le CSV complet de la session</a></p>";
   httpServer.sendContent(html);
   html = "";
-
-  // ----- Distance/V.max/V.min/V.moy : calcul cote navigateur -----
-  //
-  // Reutilise le meme fichier detaille (colonnes local_time,millis_boot,
-  // lat,lng,speed_kmh,fix,sats,laps,circuit,current_lap_ms -- cf.
-  // main.cpp) et le meme decoupage par tour que la page /compare de la
-  // version OLED/TFT (filtre "laps"==tour-1, puis troncature au dernier
-  // point de current_lap_ms minimal pour exclure l'attente au paddock).
-  // Volontairement SANS le graphique SVG associe sur OLED/TFT -- juste
-  // le calcul, pour rester dans un script court.
-  if (anyLap && lapNumbersJs.length() > 0) {
-    html += "<script>";
-    html += "var LAP_LOG_FILE='" + file + "';";
-    html += "var LAP_NUMBERS=[" + lapNumbersJs + "];";
-    html += R"JS(
-(function() {
-  function parseCsv(text) {
-    var lines = text.split(/\r?\n/);
-    var header = null, idx = null;
-    var rows = [];
-    for (var li = 0; li < lines.length; li++) {
-      var line = lines[li].trim();
-      if (!line) continue;
-      var cols = line.split(',');
-      if (!header) {
-        header = cols;
-        idx = { lat: header.indexOf('lat'), lng: header.indexOf('lng'), speed: header.indexOf('speed_kmh'), fix: header.indexOf('fix'), laps: header.indexOf('laps'), lapMs: header.indexOf('current_lap_ms'), localTime: header.indexOf('local_time') };
-        continue;
-      }
-      var lat = parseFloat(cols[idx.lat]), lng = parseFloat(cols[idx.lng]);
-      if (isNaN(lat) || isNaN(lng)) continue;
-      var fix = idx.fix >= 0 ? (parseInt(cols[idx.fix], 10) || 0) : 3;
-      if (fix < 2) continue;
-      rows.push({
-        lat: lat, lng: lng,
-        speed: idx.speed >= 0 ? (parseFloat(cols[idx.speed]) || 0) : 0,
-        laps: idx.laps >= 0 ? (parseInt(cols[idx.laps], 10) || 0) : -1,
-        lapMs: idx.lapMs >= 0 ? (parseInt(cols[idx.lapMs], 10) || 0) : 0,
-        localTime: idx.localTime >= 0 ? cols[idx.localTime] : ''
-      });
-    }
-    return rows;
-  }
-  function haversineM(lat1, lng1, lat2, lng2) {
-    var R = 6371000;
-    var dLat = (lat2 - lat1) * Math.PI / 180, dLng = (lng2 - lng1) * Math.PI / 180;
-    var s = Math.sin(dLat/2)*Math.sin(dLat/2) + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLng/2)*Math.sin(dLng/2);
-    return R * 2 * Math.atan2(Math.sqrt(s), Math.sqrt(1-s));
-  }
-  function extractLap(rows, lapNumber) {
-    var lapRows = rows.filter(function(r) { return r.laps === lapNumber - 1; });
-    if (!lapRows.length) return [];
-    var minMs = lapRows[0].lapMs, startIdx = 0;
-    for (var i = 0; i < lapRows.length; i++) if (lapRows[i].lapMs <= minMs) { minMs = lapRows[i].lapMs; startIdx = i; }
-    return lapRows.slice(startIdx);
-  }
-  function set(id, text) { var el = document.getElementById(id); if (el) el.textContent = text; }
-
-  function markAll(text) {
-    for (var k = 0; k < LAP_NUMBERS.length; k++) {
-      var n = LAP_NUMBERS[k];
-      set('start-'+n, text); set('dist-'+n, text); set('vmax-'+n, text); set('vmin-'+n, text); set('vavg-'+n, text);
-    }
-  }
-
-  // Garde-fou : si /download ne repond jamais (fichier trop volumineux
-  // pour l'AP WiFi, coupure, etc.), on ne veut plus jamais rester bloque
-  // sur "..." indefiniment sans explication -- au bout de 20s, on
-  // affiche explicitement "timeout" pour que ce soit diagnosticable
-  // depuis la page elle-meme, sans avoir besoin d'ouvrir la console.
-  var timedOut = false;
-  var timeoutId = setTimeout(function() { timedOut = true; markAll('timeout'); }, 20000);
-
-  fetch('/download?file=' + encodeURIComponent(LAP_LOG_FILE)).then(function(r) {
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    return r.text();
-  }).then(function(text) {
-    clearTimeout(timeoutId);
-    if (timedOut) return; // reponse arrivee apres coup -- deja marque "timeout", on ne l'ecrase pas a moitie
-    if (text.trim().length === 0) { markAll('log vide'); return; } // fichier detaille present mais 0 octet -- coupure probable pendant l'enregistrement, pas un bug d'affichage
-    var rows = parseCsv(text);
-    if (rows.length === 0) { markAll('log illisible'); return; } // en-tete absent/colonnes lat/lng introuvables -- fichier corrompu ou format inattendu
-    for (var k = 0; k < LAP_NUMBERS.length; k++) {
-      var n = LAP_NUMBERS[k];
-      var lr = extractLap(rows, n);
-      if (!lr.length) { set('start-'+n, '--'); set('dist-'+n, '--'); set('vmax-'+n, '--'); set('vmin-'+n, '--'); set('vavg-'+n, '--'); continue; }
-      var dist = 0, vmax = -Infinity, vmin = Infinity, sum = 0;
-      for (var j = 0; j < lr.length; j++) {
-        vmax = Math.max(vmax, lr[j].speed);
-        vmin = Math.min(vmin, lr[j].speed);
-        sum += lr[j].speed;
-        if (j > 0) dist += haversineM(lr[j-1].lat, lr[j-1].lng, lr[j].lat, lr[j].lng);
-      }
-      set('start-'+n, lr[0].localTime || '--');
-      set('dist-'+n, (dist/1000).toFixed(2) + ' km');
-      set('vmax-'+n, Math.round(vmax) + ' km/h');
-      set('vmin-'+n, Math.round(vmin) + ' km/h');
-      set('vavg-'+n, Math.round(sum/lr.length) + ' km/h');
-    }
-  }).catch(function(err) {
-    clearTimeout(timeoutId);
-    markAll('erreur'); // fetch rejetee (reseau) ou HTTP non-ok (403/404/etc.) -- visible au lieu de rester sur "..."
-  });
-})();
-)JS";
-    html += "</script>";
-  }
 
   html += PAGE_FOOTER;
   httpServer.sendContent(html);

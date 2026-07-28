@@ -614,6 +614,7 @@ static double currentLapDistanceM = 0.0;      // cumul haversine entre trames su
 static bool currentLapHasPrevPoint = false;   // faux juste apres reinit -- evite un saut errone depuis le point du tour precedent
 static double currentLapPrevLat = 0.0, currentLapPrevLng = 0.0;
 static char currentLapStartTimeStr[10] = "--:--:--"; // capturee sur la 1ere trame de chaque tour (cf. logGpsRow())
+static unsigned long lastLapMsSeen = 0xFFFFFFFFUL; // detecte le plateau/redemarrage de current_lap_ms (cf. logGpsRow())
 
 static void appendSessionLine(const String& line) {
   File f = LittleFS.open(SESSION_LOG_PATH, "a");
@@ -647,6 +648,7 @@ static void startRecording() {
   currentLapSpeedSamples = 0;
   currentLapDistanceM = 0.0;
   currentLapHasPrevPoint = false;
+  lastLapMsSeen = 0xFFFFFFFFUL; // force la capture du depart des le tout 1er point de la session
   strncpy(currentLapStartTimeStr, "--:--:--", sizeof(currentLapStartTimeStr));
   appendSessionLine(String("# session demarree ") + currentSessionCompactKey);
   Serial.printf("REC ON : %s\n", currentLogPath);
@@ -668,9 +670,35 @@ static void logGpsRow() {
   double lng = liveData.longitude / 1e7;
   float speedKmh = liveData.speedMmPerS / 1000.0f * 3.6f;
 
-  // 1ere trame accumulee depuis la derniere reinitialisation (REC ON ou
-  // tour precedent juste ecrit) -- c'est le debut reel du tour en cours.
-  if (currentLapSpeedSamples == 0) strncpy(currentLapStartTimeStr, timeBuf, sizeof(currentLapStartTimeStr));
+  unsigned long currentLapMs, bestLapMs; bool hasBest; int lapsCount;
+  getDisplayState(currentLapMs, bestLapMs, hasBest, lapsCount);
+
+  // current_lap_ms qui stagne (plateau -- observe sur le terrain le
+  // 28/07 : reste a 0 pendant 27s, le temps que le geofence s'arme,
+  // avant le vrai depart du 1er tour) : tant qu'AUCUN tour n'est encore
+  // valide (lapsCount==0) ET que current_lap_ms ne progresse pas, on
+  // considere que le tour n'a pas vraiment commence et on continue de
+  // glisser le depart/les accumulateurs en avant. IMPORTANT : strictement
+  // limite a lapsCount==0 -- une premiere version comparait juste
+  // current_lap_ms sans cette garde, et se redeclenchait a CHAQUE
+  // transition entre tours (le compteur du tour suivant peut deja
+  // apparaitre dans getDisplayState() avant que checkLapCompletion() ait
+  // pu lire/ecrire les stats du tour qui vient de se terminer -- verifie
+  // sur le log reel du 28/07, ou le tour 2 demarre direct a 1182ms sans
+  // jamais repasser par 0), ce qui aurait efface les stats de TOUS les
+  // tours suivants au lieu de corriger juste le 1er. Les transitions
+  // normales entre tours restent gerees par la reinit en fin de
+  // checkLapCompletion(), inchangee.
+  if (lapsCount == 0 && currentLapMs <= lastLapMsSeen) {
+    currentLapMaxSpeedKmh = 0.0f;
+    currentLapMinSpeedKmh = -1.0f;
+    currentLapSpeedSumKmh = 0.0;
+    currentLapSpeedSamples = 0;
+    currentLapDistanceM = 0.0;
+    currentLapHasPrevPoint = false;
+    strncpy(currentLapStartTimeStr, timeBuf, sizeof(currentLapStartTimeStr));
+  }
+  lastLapMsSeen = currentLapMs;
 
   if (speedKmh > currentLapMaxSpeedKmh) currentLapMaxSpeedKmh = speedKmh;
   if (currentLapMinSpeedKmh < 0 || speedKmh < currentLapMinSpeedKmh) currentLapMinSpeedKmh = speedKmh;
@@ -678,9 +706,6 @@ static void logGpsRow() {
   currentLapSpeedSamples++;
   if (currentLapHasPrevPoint) currentLapDistanceM += geoDistanceM(currentLapPrevLat, currentLapPrevLng, lat, lng);
   currentLapPrevLat = lat; currentLapPrevLng = lng; currentLapHasPrevPoint = true;
-
-  unsigned long currentLapMs, bestLapMs; bool hasBest; int lapsCount;
-  getDisplayState(currentLapMs, bestLapMs, hasBest, lapsCount);
 
   logFile.printf("%s,%lu,%.7f,%.7f,%.1f,%u,%u,%d,%s,%lu\n",
                  timeBuf, millis(), lat, lng, speedKmh,
@@ -722,8 +747,10 @@ static void checkLapCompletion() {
   Serial.printf("Tour %d enregistre : %s (meilleur : %s, Vmax %.0f, Vmin %.0f, Vmoy %.0f km/h, %.2f km, depart %s)\n",
                 lapsCount, lapBuf, bestBuf, currentLapMaxSpeedKmh, minSpeedKmh, avgSpeedKmh, distanceKm, currentLapStartTimeStr);
 
-  // Reinitialisation pour le tour suivant -- meme moment que l'ancien
-  // "currentLapMaxSpeedKmh = 0.0f" seul avant cet ajout.
+  // Reinitialisation pour le tour suivant -- filet de securite : en
+  // temps normal, logGpsRow() se reinitialise deja tout seul sur la
+  // trame suivante (currentLapMs qui redemarre a 0, cf. plus haut), ceci
+  // couvre juste le cas ou aucune trame ne suit avant un arret REC.
   currentLapMaxSpeedKmh = 0.0f;
   currentLapMinSpeedKmh = -1.0f;
   currentLapSpeedSumKmh = 0.0;
