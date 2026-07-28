@@ -1350,6 +1350,8 @@ static void refreshCircuitScreen() {
 
 static lv_obj_t* lblConnGps;
 static lv_obj_t* lblConnCircuit;
+static lv_obj_t* lblConnSd;
+static lv_obj_t* lblConnBatt;
 
 static void buildConnexionScreen() {
   scrConnexion = lv_obj_create(NULL);
@@ -1359,6 +1361,8 @@ static void buildConnexionScreen() {
 
   lblConnGps = createListRow(scrConnexion, 44);
   lblConnCircuit = createListRow(scrConnexion, 84);
+  lblConnSd = createListRow(scrConnexion, 124);
+  lblConnBatt = createListRow(scrConnexion, 164);
 }
 
 static void refreshConnexionScreen() {
@@ -1366,6 +1370,26 @@ static void refreshConnexionScreen() {
   snprintf(buf, sizeof(buf), "%s  Fix:%d  Sat:%d", gpsActive ? "GPS OK" : "GPS --", gpsFixStatus, gpsNumSVs);
   lv_label_set_text(lblConnGps, buf);
   lv_label_set_text(lblConnCircuit, getActiveCourseNameForDisplay());
+
+  if (gpsLogsOnSd) {
+    unsigned long usedGb10 = (unsigned long)(sdUsedBytes() * 10 / (1024ULL * 1024 * 1024));
+    unsigned long totalGb10 = (unsigned long)(sdTotalBytes() * 10 / (1024ULL * 1024 * 1024));
+    snprintf(buf, sizeof(buf), "SD OK  %lu.%lu/%lu.%lu GB",
+             usedGb10 / 10, usedGb10 % 10, totalGb10 / 10, totalGb10 % 10);
+    lv_obj_set_style_text_color(lblConnSd, lv_color_white(), 0);
+  } else {
+    snprintf(buf, sizeof(buf), "SD --  repli LittleFS");
+    lv_obj_set_style_text_color(lblConnSd, lv_palette_main(LV_PALETTE_ORANGE), 0);
+  }
+  lv_label_set_text(lblConnSd, buf);
+
+  float v = 0;
+  int raw = 0;
+  adc_get_value(&v, &raw);
+  int battPct = batteryVoltageToPercent(v);
+  snprintf(buf, sizeof(buf), "Batt %d%%  (%.2fV)", battPct, v);
+  lv_obj_set_style_text_color(lblConnBatt, battPct <= 15 ? lv_palette_main(LV_PALETTE_RED) : lv_color_white(), 0);
+  lv_label_set_text(lblConnBatt, buf);
 }
 
 // ===================== Ecran Session (liste) =====================
