@@ -1,34 +1,24 @@
 /**
- * Chrono GPS moto piste -- firmware ESP32-S3-AMOLED-1.91 (firmware_191)
- * ----------------------------------------------------------------------
- * Ex "display_only_191" (banc de test d'affichage 100% simule) --
- * devenu le vrai firmware : GPS reel (GpsManager), detection de
- * circuit/tour reelle (CourseManager, vendore depuis la lib publique
- * DovesLapTimer), sessions reelles (/sessions.csv, LittleFS), batterie
- * reelle (ADC interne), stockage SD reel (SdLogStorage, SDMMC).
- * WebServerManager (WiFi/telechargement) pas encore integre -- prochaine
- * etape.
+ * Chrono GPS moto piste -- sous-projet "display_only_191"
+ * ---------------------------------------------------------
+ * Meme principe que le display_only du projet TFT : ecran + encodeur
+ * EC11 + bouton BACK, AUCUNE dependance GPS/SD/batterie/WiFi reelle --
+ * toutes les donnees viennent d'une couche de simulation en RAM.
  *
- * Ecran + encodeur EC11 (PUSH uniquement, cf. ci-dessous) + bouton BACK.
- *
- * Navigation (pas de menu liste separe) :
+ * Navigation (encodeur conserve, pas de menu liste separe) :
  *   - Depuis Statut : BACK -> ecran Circuit (1er ecran de l'anneau)
- *   - Anneau Circuit -> Nouveau circuit -> Connexion -> Session -> Reglages
- *     -> Circuit... (rotation encodeur ou swipe tactile)
+ *   - Anneau Circuit -> Connexion -> Session -> Reglages -> Circuit...
+ *     (rotation encodeur fait tourner l'anneau)
  *   - Sur Circuit/Session/Reglages : PUSH entre en mode selection
  *     (l'encodeur change de role, selectionne un element de la liste),
- *     re-PUSH valide -- ou tap direct sur une ligne (equivalent en un
- *     seul geste).
+ *     re-PUSH valide et sort du mode selection.
  *   - BACK depuis un ecran de l'anneau (hors mode selection) -> Statut.
  *   - BACK en mode selection -> annule, sort du mode selection (reste
  *     sur le meme ecran, anneau).
- *   - Session -> PUSH/tap ouvre les tours de la session (ecran feuille),
- *     BACK y revient a la liste des sessions.
- *   - Reglages -> PUSH/tap ouvre WiFi (ecran feuille, encore factice),
- *     BACK y revient directement a Statut.
- *   - Statut : PUSH ou tap sur le bouton REC demarre l'enregistrement
- *     (si circuit detecte) ; BACK l'arrete (PUSH desarme pendant le REC,
- *     par securite).
+ *   - Session -> PUSH valide ouvre les tours de la session (ecran
+ *     feuille), BACK y revient a la liste des sessions.
+ *   - Reglages -> PUSH valide ouvre WiFi (ecran feuille), BACK y
+ *     revient directement a Statut (comme le TFT d'origine).
  */
 
 #include <Arduino.h>
@@ -38,17 +28,18 @@
 #include <math.h>
 #include <vector>
 #include <algorithm>
-#include <LittleFS.h>
-#include <CourseManager.h>
 
 #include "i2c_bsp.h"
 #include "touch_bsp.h"
 #include "display_bsp.h"
 #include "fonts_teko.h"
 #include "splash_pigteam.h"
-#include "GpsManager.h"
-#include "adc_bsp.h"
-#include "SdLogStorage.h"
+
+// display_only_191 -- banc de test ecran : AUCUNE dependance GPS/SD/
+// batterie reelle, tout est simule en RAM (cf. bloc "Simulation moteur"
+// plus bas). CourseManager/GpsManager/SdLogStorage/adc_bsp restent dans
+// lib/ (repris tels quels du firmware reel pour reference future) mais
+// ne sont plus inclus ni appeles ici.
 
 // ===================== Pins (valides au bring-up 1.91) =====================
 #define ENCODER_CLK   2
@@ -80,70 +71,18 @@ static void formatLapTime(unsigned long ms, char* buf, size_t bufSize) {
   snprintf(buf, bufSize, "%lu:%02lu.%03lu", minutes, seconds, millisPart);
 }
 
-// ===================== Cache GPS local (fixStatus/numSVs/vitesse) =====================
+// ===================== Horloge simulee (pas de fix GPS UTC reel) =====================
 //
-// Copies locales de liveData, mises a jour a chaque tour de loop() --
-// utilisees par l'affichage (evite de repeter liveData.xxx partout,
-// et garde un point unique si on veut lisser/lisser plus tard).
-static int gpsFixStatus = 0;
-static int gpsNumSVs = 0;
-static float gpsSpeedKmh = 0;
-
-static void gpsUpdateFromLiveData() {
-  gpsFixStatus = liveData.fixStatus;
-  gpsNumSVs = liveData.numSVs;
-  gpsSpeedKmh = liveData.speedMmPerS * 3.6f / 1000.0f; // mm/s -> km/h
-}
-
-// ===================== Utilitaires date/heure (GPS UTC -> heure locale) =====================
-//
-// Repris a l'identique du firmware TFT reel -- utcTmToEpoch() est une
-// implementation portable (algorithme "days_from_civil" de Howard
-// Hinnant) plutot que mktime()/timegm(), qui dependent de la TZ systeme
-// et donneraient un resultat faux ici (TZ deja postionnee sur l'heure
-// locale via tzset(), pas UTC).
-static time_t utcTmToEpoch(const struct tm& tmUtc) {
-  int year = tmUtc.tm_year + 1900;
-  int month = tmUtc.tm_mon + 1;
-  int day = tmUtc.tm_mday;
-  int64_t y = year - (month <= 2 ? 1 : 0);
-  int64_t era = (y >= 0 ? y : y - 399) / 400;
-  int64_t yoe = y - era * 400;
-  int64_t doy = (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;
-  int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-  int64_t days = era * 146097 + doe - 719468;
-  return (time_t)(days * 86400 + tmUtc.tm_hour * 3600 + tmUtc.tm_min * 60 + tmUtc.tm_sec);
-}
-
+// Demarre a une heure arbitraire (14:32:00) et avance avec millis() --
+// suffisant pour calibrer l'affichage de l'heure sur le banc, sans
+// dependre d'un fix GPS.
 static void getLocalDateTime(char* dateBuf, size_t dateBufSize, char* timeBuf, size_t timeBufSize) {
-  struct tm utcTm = {};
-  utcTm.tm_year = liveData.year - 1900;
-  utcTm.tm_mon  = liveData.month - 1;
-  utcTm.tm_mday = liveData.day;
-  utcTm.tm_hour = liveData.hour;
-  utcTm.tm_min  = liveData.minute;
-  utcTm.tm_sec  = liveData.second;
-  time_t epoch = utcTmToEpoch(utcTm);
-  struct tm localTm;
-  localtime_r(&epoch, &localTm);
-  if (dateBuf) snprintf(dateBuf, dateBufSize, "%04d-%02d-%02d", localTm.tm_year + 1900, localTm.tm_mon + 1, localTm.tm_mday);
-  if (timeBuf) snprintf(timeBuf, timeBufSize, "%02d:%02d:%02d", localTm.tm_hour, localTm.tm_min, localTm.tm_sec);
-}
-
-static void getLocalDateTimeCompact(char* buf, size_t bufSize) {
-  struct tm utcTm = {};
-  utcTm.tm_year = liveData.year - 1900;
-  utcTm.tm_mon  = liveData.month - 1;
-  utcTm.tm_mday = liveData.day;
-  utcTm.tm_hour = liveData.hour;
-  utcTm.tm_min  = liveData.minute;
-  utcTm.tm_sec  = liveData.second;
-  time_t epoch = utcTmToEpoch(utcTm);
-  struct tm localTm;
-  localtime_r(&epoch, &localTm);
-  snprintf(buf, bufSize, "%04d%02d%02d_%02d%02d%02d",
-           localTm.tm_year + 1900, localTm.tm_mon + 1, localTm.tm_mday,
-           localTm.tm_hour, localTm.tm_min, localTm.tm_sec);
+  unsigned long totalSec = (millis() / 1000) + (14UL * 3600 + 32UL * 60);
+  unsigned long h = (totalSec / 3600) % 24;
+  unsigned long m = (totalSec / 60) % 60;
+  unsigned long s = totalSec % 60;
+  if (dateBuf) snprintf(dateBuf, dateBufSize, "2026-01-01");
+  if (timeBuf) snprintf(timeBuf, timeBufSize, "%02lu:%02lu:%02lu", h, m, s);
 }
 
 // Inverse de formatLapTime() -- "M:SS.mmm" -> millisecondes. ULONG_MAX si
@@ -159,321 +98,54 @@ static unsigned long parseLapTimeStr(const String& s) {
   return (unsigned long)(minutes * 60000 + seconds * 1000 + millisPart);
 }
 
-// ===================== CourseManager (detection auto / mode proximite) =====================
+// ===================== Simulation moteur (banc de test, sans GPS/SD/batterie reels) =====================
 //
-// Port direct de la logique du firmware TFT reel (main.cpp du projet
-// pigteam-chrono-tft) -- geofencing, mode manuel, capture de nouveau
-// circuit compris. Cf. ce fichier pour le detail des commentaires
-// d'origine (repris ici de facon condensee).
+// Meme principe que le display_only du projet TFT d'origine : un seul
+// PUSH (depuis Statut) fait avancer un cycle Recherche -> Circuit
+// reconnu -> REC -> Circuit reconnu (stop), toutes les donnees
+// affichees (position/tours/vitesse/batterie) viennent d'une couche de
+// simulation en RAM. But : placer/calibrer rapidement les ecrans sur
+// le banc, sans GPS/SD/batterie branches. La vraie logique
+// (CourseManager/GpsManager/SdLogStorage/adc_bsp, dans lib/) est
+// portee dans firmware_191 une fois la mise en page validee ici.
 
-static const char* CIRCUITS_FILE_PATH = "/circuits.csv";
-static const char* SESSION_LOG_PATH = "/sessions.csv";
-static char courseNameBuf[MAX_COURSES][32];
-static TrackConfig myTracks = { "Mes circuits PIGTEAM", "PIGTEAM", {}, 0 };
-static CourseManager* courseManager = nullptr;
-static int lastLapCount = 0;
+enum DemoState { DEMO_SEARCHING, DEMO_DETECTED, DEMO_RECORDING };
+static DemoState demoState = DEMO_SEARCHING;
 
-static int splitCsvLine(const String& line, String fields[], int maxFields) {
-  int count = 0, start = 0;
-  for (int i = 0; i <= (int)line.length() && count < maxFields; i++) {
-    if (i == (int)line.length() || line[i] == ',') {
-      fields[count++] = line.substring(start, i);
-      start = i + 1;
-    }
-  }
-  return count;
-}
+// ----- Circuits simules (pas de circuits.csv, pas de LittleFS necessaire) -----
+static const char* DEMO_COURSE_NAMES[] = { "PigTeam_track", "Croix-en-Ternois", "Circuit Carole" };
+static const int DEMO_COURSE_COUNT = 3;
+static int demoSelectedCourse = 0; // 0 = Auto (nom generique), 1..N = circuit force manuellement
 
-static void loadActiveCircuitsIntoTracks() {
-  if (!LittleFS.exists(CIRCUITS_FILE_PATH)) {
-    Serial.println("Circuits: /circuits.csv absent -- demarrage en mode proximite uniquement.");
-    myTracks.courseCount = 0;
-    return;
-  }
-  File f = LittleFS.open(CIRCUITS_FILE_PATH, "r");
-  if (!f) {
-    Serial.println("Circuits: impossible d'ouvrir /circuits.csv -- mode proximite uniquement.");
-    myTracks.courseCount = 0;
-    return;
-  }
+struct SimCourseEntry { const char* name; };
+struct SimTrackList {
+  int courseCount;
+  SimCourseEntry courses[DEMO_COURSE_COUNT];
+};
+static SimTrackList myTracks = {
+  DEMO_COURSE_COUNT,
+  { { DEMO_COURSE_NAMES[0] }, { DEMO_COURSE_NAMES[1] }, { DEMO_COURSE_NAMES[2] } }
+};
 
-  int loaded = 0;
-  bool firstLine = true;
-  while (f.available() && loaded < MAX_COURSES) {
-    String line = f.readStringUntil('\n');
-    line.trim();
-    if (line.length() == 0) continue;
-    if (firstLine) { firstLine = false; continue; }
-
-    String fld[17];
-    if (splitCsvLine(line, fld, 17) < 17) continue;
-    if (fld[0].toInt() != 1) continue;
-
-    CourseConfig& c = myTracks.courses[loaded];
-    strncpy(courseNameBuf[loaded], fld[1].c_str(), sizeof(courseNameBuf[loaded]) - 1);
-    courseNameBuf[loaded][sizeof(courseNameBuf[loaded]) - 1] = '\0';
-    c.name = courseNameBuf[loaded];
-    c.lengthFt = fld[2].toFloat();
-    c.startALat = atof(fld[3].c_str());  c.startALng = atof(fld[4].c_str());
-    c.startBLat = atof(fld[5].c_str());  c.startBLng = atof(fld[6].c_str());
-    c.hasSector2 = fld[7].toInt() == 1;
-    c.sector2ALat = atof(fld[8].c_str());  c.sector2ALng = atof(fld[9].c_str());
-    c.sector2BLat = atof(fld[10].c_str()); c.sector2BLng = atof(fld[11].c_str());
-    c.hasSector3 = fld[12].toInt() == 1;
-    c.sector3ALat = atof(fld[13].c_str()); c.sector3ALng = atof(fld[14].c_str());
-    c.sector3BLat = atof(fld[15].c_str()); c.sector3BLng = atof(fld[16].c_str());
-    loaded++;
-  }
-  f.close();
-  myTracks.courseCount = loaded;
-  Serial.printf("Circuits: %d circuit(s) actif(s) charge(s) depuis circuits.csv.\n", loaded);
-}
-
-// ----- Mode manuel (force un circuit precis, court-circuite la detection) -----
-static DovesLapTimer manualTimer(7.0, &Serial);
-static bool manualOverrideActive = false;
-static int manualCourseIndex = -1;
-
-static bool newCircuitCaptureArmed = false;
-static bool pendingNewCircuitCapture = false;
-static double pendingSaLat = 0, pendingSaLng = 0, pendingSbLat = 0, pendingSbLng = 0;
-static bool newCircuitAutoSaved = false;
-static double prevWaypointLat = 0, prevWaypointLng = 0;
-
+static void activateAutoMode() { demoSelectedCourse = 0; }
 static void activateManualCourse(int index) {
   if (index < 0 || index >= myTracks.courseCount) return;
-  CourseConfig& c = myTracks.courses[index];
-
-  manualTimer.reset();
-  manualTimer.setStartFinishLine(c.startALat, c.startALng, c.startBLat, c.startBLng);
-  if (c.hasSector2) manualTimer.setSector2Line(c.sector2ALat, c.sector2ALng, c.sector2BLat, c.sector2BLng);
-  if (c.hasSector3) manualTimer.setSector3Line(c.sector3ALat, c.sector3ALng, c.sector3BLat, c.sector3BLng);
-
-  manualOverrideActive = true;
-  manualCourseIndex = index;
-  lastLapCount = 0;
-  newCircuitCaptureArmed = false;
-  pendingNewCircuitCapture = false;
-  Serial.printf("Circuit force : %s\n", c.name);
+  demoSelectedCourse = index + 1;
 }
-
-static bool geofenceCheckDone = false;
-
-static void activateAutoMode() {
-  manualOverrideActive = false;
-  manualCourseIndex = -1;
-  courseManager->reset();
-  geofenceCheckDone = false;
-  lastLapCount = 0;
-  newCircuitCaptureArmed = false;
-  pendingNewCircuitCapture = false;
-  Serial.println("Retour en mode detection automatique.");
-}
-
-// ----- Geofencing (reconnaissance quasi instantanee sur circuit connu) -----
-static const float GEOFENCE_MAX_DISTANCE_M = 15000.0f;
-
-static void checkCircuitGeofence(double lat, double lng) {
-  geofenceCheckDone = true;
-  int bestIdx = -1;
-  double bestDist = 1e18;
-  for (int i = 0; i < myTracks.courseCount; i++) {
-    CourseConfig& c = myTracks.courses[i];
-    double midLat = (c.startALat + c.startBLat) / 2.0;
-    double midLng = (c.startALng + c.startBLng) / 2.0;
-    double d = geoHaversine(lat, lng, midLat, midLng);
-    if (d < bestDist) { bestDist = d; bestIdx = i; }
-  }
-  if (bestIdx >= 0 && bestDist <= GEOFENCE_MAX_DISTANCE_M) {
-    Serial.printf("Geofencing : a %.1fkm de \"%s\" -- activation directe.\n", bestDist / 1000.0, myTracks.courses[bestIdx].name);
-    activateManualCourse(bestIdx);
-  } else {
-    Serial.println("Geofencing : aucun circuit actif a moins de 15km -- detection normale par tour+longueur.");
-  }
-}
-
-static bool lapAnythingEffective() {
-  return !manualOverrideActive && courseManager->isLapAnythingActive();
-}
-static bool detectionEffectivelyComplete() {
-  return manualOverrideActive || courseManager->isDetectionComplete();
-}
-
-// ----- Historique GPS court terme (calcul de cap pour la capture de nouveau circuit) -----
-struct GpsHistoryPoint { double lat; double lng; unsigned long timeMs; };
-static const int GPS_HISTORY_SIZE = 40;
-static GpsHistoryPoint gpsHistory[GPS_HISTORY_SIZE];
-static int gpsHistoryCount = 0;
-static int gpsHistoryHead = 0;
-
-static void pushGpsHistory(double lat, double lng, unsigned long timeMs) {
-  gpsHistory[gpsHistoryHead] = { lat, lng, timeMs };
-  gpsHistoryHead = (gpsHistoryHead + 1) % GPS_HISTORY_SIZE;
-  if (gpsHistoryCount < GPS_HISTORY_SIZE) gpsHistoryCount++;
-}
-
-static bool findHistoryPointBefore(unsigned long nowMs, unsigned long windowMs, double& outLat, double& outLng) {
-  if (gpsHistoryCount == 0) return false;
-  int best = (gpsHistoryHead - 1 + GPS_HISTORY_SIZE) % GPS_HISTORY_SIZE;
-  for (int i = 0; i < gpsHistoryCount; i++) {
-    int j = (gpsHistoryHead - 1 - i + GPS_HISTORY_SIZE) % GPS_HISTORY_SIZE;
-    best = j;
-    if (nowMs - gpsHistory[j].timeMs >= windowMs) break;
-  }
-  outLat = gpsHistory[best].lat;
-  outLng = gpsHistory[best].lng;
-  return true;
-}
-
-static double geoBearingDeg(double lat1, double lng1, double lat2, double lng2) {
-  double phi1 = radians(lat1), phi2 = radians(lat2);
-  double dlambda = radians(lng2 - lng1);
-  double y = sin(dlambda) * cos(phi2);
-  double x = cos(phi1) * sin(phi2) - sin(phi1) * cos(phi2) * cos(dlambda);
-  return fmod(degrees(atan2(y, x)) + 360.0, 360.0);
-}
-
-static void geoDestinationPoint(double lat, double lng, double bearingDeg, double distanceM, double& outLat, double& outLng) {
-  const double R = 6371000.0;
-  double delta = distanceM / R;
-  double theta = radians(bearingDeg);
-  double phi1 = radians(lat);
-  double lambda1 = radians(lng);
-  double phi2 = asin(sin(phi1) * cos(delta) + cos(phi1) * sin(delta) * cos(theta));
-  double lambda2 = lambda1 + atan2(sin(theta) * sin(delta) * cos(phi1), cos(delta) - sin(phi1) * sin(phi2));
-  outLat = degrees(phi2);
-  outLng = fmod(degrees(lambda2) + 540.0, 360.0) - 180.0;
-}
-
-// ----- Capture automatique de nouveau circuit -----
-static const double NEW_CIRCUIT_LINE_OFFSET_M = 4.0;
-
-static void armNewCircuitCapture() {
-  manualOverrideActive = false;
-  manualCourseIndex = -1;
-  courseManager->reset();
-  geofenceCheckDone = true; // suspend le geofencing pendant la capture
-  lastLapCount = 0;
-  newCircuitCaptureArmed = true;
-  newCircuitAutoSaved = false;
-  pendingNewCircuitCapture = false;
-  prevWaypointLat = 0; prevWaypointLng = 0;
-  Serial.println("Capture de nouveau circuit armee -- roule un tour complet pour l'enregistrer.");
-}
-
-static void cancelNewCircuitCapture() {
-  if (!newCircuitCaptureArmed) return;
-  if (newCircuitAutoSaved) {
-    Serial.println("BACK : capture deja ecrite dans circuits.csv -- rien a annuler ici.");
-    return;
-  }
-  newCircuitCaptureArmed = false;
-  pendingNewCircuitCapture = false;
-  prevWaypointLat = 0; prevWaypointLng = 0;
-  Serial.println("BACK : capture de nouveau circuit annulee.");
-}
-
-static void appendAutoCircuitToFile(const char* name, float lengthFt) {
-  File f = LittleFS.open(CIRCUITS_FILE_PATH, "a");
-  if (!f) { Serial.println("Capture circuit : impossible d'ouvrir circuits.csv en ecriture."); return; }
-  f.printf("0,%s,%.1f,%.7f,%.7f,%.7f,%.7f,0,0,0,0,0,0,0,0,0,0,0\n",
-           name, lengthFt, pendingSaLat, pendingSaLng, pendingSbLat, pendingSbLng);
-  f.close();
-  Serial.printf("Nouveau circuit capture et sauvegarde (inactif) : %s\n", name);
-}
-
-static void checkAutoCircuitCapture(unsigned long timeMs) {
-  if (!newCircuitCaptureArmed || manualOverrideActive || newCircuitAutoSaved) return;
-
-  WaypointLapTimer* t = courseManager->getLapAnythingTimer();
-  double wpLat = t->getWaypointLat();
-  double wpLng = t->getWaypointLng();
-
-  if (!pendingNewCircuitCapture && (wpLat != 0.0 || wpLng != 0.0) &&
-      prevWaypointLat == 0.0 && prevWaypointLng == 0.0) {
-    double histLat, histLng;
-    if (findHistoryPointBefore(timeMs, 2000, histLat, histLng)) {
-      double heading = geoBearingDeg(histLat, histLng, wpLat, wpLng);
-      double perp = fmod(heading + 90.0, 360.0);
-      geoDestinationPoint(wpLat, wpLng, perp, NEW_CIRCUIT_LINE_OFFSET_M, pendingSaLat, pendingSaLng);
-      geoDestinationPoint(wpLat, wpLng, perp + 180.0, NEW_CIRCUIT_LINE_OFFSET_M, pendingSbLat, pendingSbLng);
-      pendingNewCircuitCapture = true;
-      Serial.println("Capture circuit : point de reference repere, ligne A/B estimee -- confirmation au premier tour valide.");
-    }
-  }
-  prevWaypointLat = wpLat;
-  prevWaypointLng = wpLng;
-
-  if (pendingNewCircuitCapture && t->getRaceStarted() && lapAnythingEffective()) {
-    char compactDateTime[16];
-    getLocalDateTimeCompact(compactDateTime, sizeof(compactDateTime));
-    char name[32];
-    snprintf(name, sizeof(name), "Nouveau_%s", compactDateTime);
-    float lengthFt = t->getLastLapDistance() * 3.28084f;
-    appendAutoCircuitToFile(name, lengthFt);
-    newCircuitAutoSaved = true;
-    pendingNewCircuitCapture = false;
-  }
-}
-
-// ----- Traitement d'un fix GPS -----
-static void processGpsFix(double lat, double lng, float altM, float speedKnots, unsigned long timeMs) {
-  if (liveData.fixStatus < 2) return;
-  pushGpsHistory(lat, lng, timeMs);
-
-  if (!geofenceCheckDone && !manualOverrideActive) {
-    checkCircuitGeofence(lat, lng);
-  }
-
-  if (manualOverrideActive) {
-    manualTimer.updateCurrentTime(timeMs);
-    manualTimer.loop(lat, lng, altM, speedKnots);
-  } else {
-    courseManager->updateCurrentTime(timeMs);
-    courseManager->loop(lat, lng, altM, speedKnots);
-    checkAutoCircuitCapture(timeMs);
-  }
-}
-
-// ----- Etat d'affichage courant (tour en cours/meilleur/nb de tours) -----
-static void getDisplayState(unsigned long& currentLapMs, unsigned long& bestLapMs, bool& hasBest, int& lapsCount) {
-  currentLapMs = 0; bestLapMs = 0; hasBest = false; lapsCount = 0;
-  if (manualOverrideActive) {
-    if (manualTimer.getRaceStarted()) currentLapMs = manualTimer.getCurrentLapTime();
-    hasBest = manualTimer.getBestLapNumber() > 0;
-    bestLapMs = manualTimer.getBestLapTime();
-    lapsCount = manualTimer.getLaps();
-  } else if (lapAnythingEffective()) {
-    WaypointLapTimer* t = courseManager->getLapAnythingTimer();
-    if (t->getRaceStarted()) currentLapMs = t->getCurrentLapTime();
-    hasBest = t->getBestLapNumber() > 0;
-    bestLapMs = t->getBestLapTime();
-    lapsCount = t->getLaps();
-  } else if (DovesLapTimer* t = courseManager->getActiveTimer()) {
-    if (t->getRaceStarted()) currentLapMs = t->getCurrentLapTime();
-    hasBest = t->getBestLapNumber() > 0;
-    bestLapMs = t->getBestLapTime();
-    lapsCount = t->getLaps();
-  }
-}
-
-static unsigned long getLastFinishedLapMs() {
-  if (manualOverrideActive) return manualTimer.getLastLapTime();
-  if (lapAnythingEffective()) return courseManager->getLapAnythingTimer()->getLastLapTime();
-  if (DovesLapTimer* t = courseManager->getActiveTimer()) return t->getLastLapTime();
-  return 0;
-}
+// Ecran "Nouveau circuit" garde a but de calibration d'UI -- pas de
+// vraie capture GPS ici, juste de quoi tester l'ecran/le bouton.
+static void armNewCircuitCapture() { Serial.println("Capture nouveau circuit (simulee -- juste pour tester l'ecran)."); }
+static void cancelNewCircuitCapture() {}
 
 static const char* getActiveCourseNameForDisplay() {
-  if (newCircuitCaptureArmed) return newCircuitAutoSaved ? "Circuit capture !" : "CAPTURE NEW TRACK";
-  if (manualOverrideActive) return myTracks.courses[manualCourseIndex].name;
-  if (!detectionEffectivelyComplete()) return "Detection...";
-  if (lapAnythingEffective()) return "Inconnu (proximite)";
-  return courseManager->getActiveCourseName();
+  if (demoState == DEMO_SEARCHING) return "Detection...";
+  return DEMO_COURSE_NAMES[demoSelectedCourse == 0 ? 0 : demoSelectedCourse - 1];
+}
+static bool detectionEffectivelyComplete() {
+  return demoState != DEMO_SEARCHING;
 }
 
-// ===================== Sessions (carnet /sessions.csv, LittleFS) =====================
-
+// ----- Sessions/tours simules (en RAM, pas de sessions.csv) -----
 struct SessionSummary {
   String compactKey;
   int lapCount;
@@ -484,198 +156,118 @@ struct LapDetail {
   unsigned long lapMs;
   String circuit;
 };
+static std::vector<SessionSummary> simSessions;
+static std::vector<std::vector<LapDetail>> simSessionLaps; // parallele a simSessions, meme index
 
-static std::vector<SessionSummary> loadSessionSummaries() {
-  std::vector<SessionSummary> result;
-  File f = LittleFS.open(SESSION_LOG_PATH, "r");
-  if (!f) return result;
-
-  bool inSession = false;
-  SessionSummary cur;
-  static const char* MARK_START = "# session demarree ";
-  static const char* MARK_STOP = "# session arretee";
-
-  while (f.available()) {
-    String line = f.readStringUntil('\n');
-    line.trim();
-    if (line.length() == 0) continue;
-
-    if (line.startsWith(MARK_START)) {
-      if (inSession) result.push_back(cur);
-      cur = SessionSummary();
-      cur.compactKey = line.substring(strlen(MARK_START));
-      cur.lapCount = 0;
-      cur.bestLapMs = ULONG_MAX;
-      inSession = true;
-      continue;
-    }
-    if (line.startsWith(MARK_STOP)) {
-      if (inSession) { result.push_back(cur); inSession = false; }
-      continue;
-    }
-    if (!inSession) continue;
-
-    String fld[6];
-    if (splitCsvLine(line, fld, 6) < 6) continue;
-    cur.lapCount++;
-    unsigned long lapMs = parseLapTimeStr(fld[3]);
-    if (lapMs != ULONG_MAX && lapMs < cur.bestLapMs) cur.bestLapMs = lapMs;
-  }
-  if (inSession) result.push_back(cur);
-  f.close();
-  return result;
-}
-
+static std::vector<SessionSummary> loadSessionSummaries() { return simSessions; }
 static std::vector<LapDetail> loadLapsForSession(const String& compactKey) {
-  std::vector<LapDetail> result;
-  File f = LittleFS.open(SESSION_LOG_PATH, "r");
-  if (!f) return result;
-
-  bool inTarget = false;
-  static const char* MARK_START = "# session demarree ";
-  static const char* MARK_STOP = "# session arretee";
-
-  while (f.available()) {
-    String line = f.readStringUntil('\n');
-    line.trim();
-    if (line.length() == 0) continue;
-
-    if (line.startsWith(MARK_START)) {
-      inTarget = (line.substring(strlen(MARK_START)) == compactKey);
-      continue;
-    }
-    if (line.startsWith(MARK_STOP)) {
-      if (inTarget) break;
-      continue;
-    }
-    if (!inTarget) continue;
-
-    String fld[6];
-    if (splitCsvLine(line, fld, 6) < 6) continue;
-    LapDetail lap;
-    lap.lapNumber = fld[2].toInt();
-    lap.lapMs = parseLapTimeStr(fld[3]);
-    lap.circuit = fld[5];
-    result.push_back(lap);
+  for (size_t i = 0; i < simSessions.size(); i++) {
+    if (simSessions[i].compactKey == compactKey) return simSessionLaps[i];
   }
-  f.close();
-  return result;
+  return {};
 }
+static String formatCompactKeyShort(const String& key) { return key; } // deja court en simulation
 
-// "AAAAMMJJ_HHMMSS" -> "JJ/MM HH:MM"
-static String formatCompactKeyShort(const String& key) {
-  if (key.length() < 15) return key;
-  return key.substring(6, 8) + "/" + key.substring(4, 6) + " " + key.substring(9, 11) + ":" + key.substring(11, 13);
-}
-
-// ===================== Enregistrement (REC) =====================
-
-static File logFile;
-static bool loggingOk = false;
-static char currentLogPath[40] = "";
-static char currentSessionCompactKey[16] = "";
+// ----- Enregistrement (REC) simule -----
 static bool recordingEnabled = false;
+static unsigned long simLapStartMs = 0;
+static unsigned long simLastLapMs = 0;
+static unsigned long simBestLapMs = ULONG_MAX;
+static int simLapsCount = 0;
+static const unsigned long SIM_LAP_DURATION_MS = 22000; // un "tour" toutes les ~22s en REC, pour voir defiler l'ecran
 
-static void appendSessionLine(const String& line) {
-  File f = LittleFS.open(SESSION_LOG_PATH, "a");
-  if (!f) { Serial.println("Carnet de session: impossible d'ecrire /sessions.csv."); return; }
-  f.println(line);
-  f.close();
+static void getDisplayState(unsigned long& currentLapMs, unsigned long& bestLapMs, bool& hasBest, int& lapsCount) {
+  currentLapMs = recordingEnabled ? (millis() - simLapStartMs) : 0;
+  hasBest = simBestLapMs != ULONG_MAX;
+  bestLapMs = hasBest ? simBestLapMs : 0;
+  lapsCount = simLapsCount;
 }
+static unsigned long getLastFinishedLapMs() { return simLastLapMs; }
 
 static void startRecording() {
   if (recordingEnabled) return;
-  if (!liveData.year) {
-    Serial.println("REC refuse : pas encore de fix GPS (horodatage necessaire).");
-    return;
-  }
-  getLocalDateTimeCompact(currentSessionCompactKey, sizeof(currentSessionCompactKey));
-  snprintf(currentLogPath, sizeof(currentLogPath), "/log_%s.csv", currentSessionCompactKey);
-
-  logFile = gpsLogFs->open(currentLogPath, "w");
-  if (!logFile) {
-    Serial.printf("REC : impossible de creer %s\n", currentLogPath);
-    return;
-  }
-  logFile.println("local_time,millis_boot,lat,lng,speed_kmh,fix,sats,laps,circuit,current_lap_ms");
-  logFile.flush();
-  loggingOk = true;
   recordingEnabled = true;
-  lastLapCount = 0;
-  appendSessionLine(String("# session demarree ") + currentSessionCompactKey);
-  Serial.printf("REC ON : %s\n", currentLogPath);
+  simLapStartMs = millis();
+  simLastLapMs = 0;
+  simBestLapMs = ULONG_MAX;
+  simLapsCount = 0;
+
+  SessionSummary s;
+  s.compactKey = String("SIM_") + String(millis() / 1000);
+  s.lapCount = 0;
+  s.bestLapMs = ULONG_MAX;
+  simSessions.push_back(s);
+  simSessionLaps.push_back(std::vector<LapDetail>());
+  if (simSessions.size() > 8) { // meme limite d'affichage que le projet principal
+    simSessions.erase(simSessions.begin());
+    simSessionLaps.erase(simSessionLaps.begin());
+  }
+  Serial.println("REC ON (simule)");
 }
 
 static void stopRecording() {
   if (!recordingEnabled) return;
-  if (loggingOk) { logFile.flush(); logFile.close(); loggingOk = false; }
-  appendSessionLine("# session arretee");
   recordingEnabled = false;
-  Serial.printf("REC OFF : %s ferme.\n", currentLogPath);
+  Serial.println("REC OFF (simule)");
 }
 
-static void logGpsRow() {
-  if (!loggingOk) return;
-  char timeBuf[10];
-  getLocalDateTime(nullptr, 0, timeBuf, sizeof(timeBuf));
-  double lat = liveData.latitude / 1e7;
-  double lng = liveData.longitude / 1e7;
-  float speedKmh = liveData.speedMmPerS / 1000.0f * 3.6f;
-
-  unsigned long currentLapMs, bestLapMs; bool hasBest; int lapsCount;
-  getDisplayState(currentLapMs, bestLapMs, hasBest, lapsCount);
-
-  logFile.printf("%s,%lu,%.7f,%.7f,%.1f,%u,%u,%d,%s,%lu\n",
-                 timeBuf, millis(), lat, lng, speedKmh,
-                 gpsFixStatus, gpsNumSVs, lapsCount,
-                 getActiveCourseNameForDisplay(), currentLapMs);
-
-  static unsigned long lastFlush = 0;
-  if (millis() - lastFlush >= 5000) { lastFlush = millis(); logFile.flush(); }
-}
-
+// Simule la fin d'un tour toutes les SIM_LAP_DURATION_MS pendant le REC.
 static void checkLapCompletion() {
   if (!recordingEnabled) return;
-  unsigned long currentLapMs, bestLapMs; bool hasBest; int lapsCount;
-  getDisplayState(currentLapMs, bestLapMs, hasBest, lapsCount);
-  if (lapsCount <= lastLapCount) return;
-  lastLapCount = lapsCount;
+  unsigned long elapsed = millis() - simLapStartMs;
+  if (elapsed < SIM_LAP_DURATION_MS) return;
 
-  char dateBuf[12], timeBuf[10];
-  getLocalDateTime(dateBuf, sizeof(dateBuf), timeBuf, sizeof(timeBuf));
-  char lapBuf[16], bestBuf[16];
-  formatLapTime(getLastFinishedLapMs(), lapBuf, sizeof(lapBuf));
-  formatLapTime(hasBest ? bestLapMs : 0, bestBuf, sizeof(bestBuf));
+  simLapStartMs = millis();
+  simLastLapMs = elapsed;
+  if (simLastLapMs < simBestLapMs) simBestLapMs = simLastLapMs;
+  simLapsCount++;
 
-  char line[128];
-  snprintf(line, sizeof(line), "%s,%s,%d,%s,%s,%s",
-           dateBuf, timeBuf, lapsCount, lapBuf, bestBuf, getActiveCourseNameForDisplay());
-  appendSessionLine(line);
-  Serial.printf("Tour %d enregistre : %s (meilleur : %s)\n", lapsCount, lapBuf, bestBuf);
-}
+  if (!simSessions.empty()) {
+    SessionSummary& s = simSessions.back();
+    s.lapCount = simLapsCount;
+    if (simLastLapMs < s.bestLapMs) s.bestLapMs = simLastLapMs;
 
-// ===================== Batterie (ADC interne, deja valide au bring-up 1.91) =====================
-
-static int batteryVoltageToPercent(float v) {
-  if (v >= 4.15f) return 100;
-  if (v <= 3.0f)  return 0;
-  struct { float v; int pct; } curve[] = {
-    {4.15f, 100}, {4.0f, 85}, {3.85f, 65}, {3.7f, 45},
-    {3.55f, 25}, {3.4f, 10}, {3.2f, 3}, {3.0f, 0}
-  };
-  for (int i = 0; i < 7; i++) {
-    if (v >= curve[i+1].v) {
-      float t = (v - curve[i+1].v) / (curve[i].v - curve[i+1].v);
-      return curve[i+1].pct + (int)(t * (curve[i].pct - curve[i+1].pct));
-    }
+    LapDetail lap;
+    lap.lapNumber = simLapsCount;
+    lap.lapMs = simLastLapMs;
+    lap.circuit = getActiveCourseNameForDisplay();
+    simSessionLaps.back().push_back(lap);
   }
-  return 0;
+  Serial.printf("Tour %d simule : %lu ms\n", simLapsCount, simLastLapMs);
 }
 
+// ----- Cycle demo pilote au PUSH (ou tap REC) depuis l'ecran Statut -----
+static void simAdvanceDemoState() {
+  if (demoState == DEMO_SEARCHING) {
+    demoState = DEMO_DETECTED;
+  } else if (demoState == DEMO_DETECTED) {
+    demoState = DEMO_RECORDING;
+    startRecording();
+  } else { // DEMO_RECORDING
+    demoState = DEMO_DETECTED;
+    stopRecording();
+  }
+}
+
+// ----- Batterie simulee (cycle lent aller-retour, pas de lecture ADC) -----
 static int readBatteryPercent() {
-  float v; int raw;
-  adc_get_value(&v, &raw);
-  return batteryVoltageToPercent(v);
+  const unsigned long period = 60000; // cycle complet ~60s : 100% -> 20% -> 100%
+  unsigned long phase = millis() % period;
+  float ratio = (phase < period / 2)
+    ? (1.0f - (float)phase / (period / 2))
+    : ((float)(phase - period / 2) / (period / 2));
+  return 20 + (int)(ratio * 80.0f);
+}
+
+// ----- GPS simule (juste de quoi remplir Fix/Sat/vitesse a l'ecran) -----
+static bool gpsActive = true;
+static uint8_t gpsFixStatus = 3;
+static uint8_t gpsNumSVs = 9;
+static float gpsSpeedKmh = 0.0f;
+
+static void simGpsTick() {
+  gpsNumSVs = 8 + (uint8_t)((millis() / 3000) % 5);
+  gpsSpeedKmh = recordingEnabled ? (60.0f + 40.0f * sinf(millis() / 4000.0f)) : 0.0f;
 }
 
 // ===================== Navigation =====================
@@ -773,8 +365,8 @@ static lv_obj_t* lblTours;
 // Tap sur le bouton REC (visible uniquement en mode "circuit detecte") --
 // equivalent tactile du PUSH encodeur pour cette transition precise.
 static void btnRecClickedCb(lv_event_t* e) {
-  if (detectionEffectivelyComplete() && !recordingEnabled) {
-    startRecording();
+  if (demoState == DEMO_DETECTED) {
+    simAdvanceDemoState(); // -> DEMO_RECORDING
   }
 }
 
@@ -1318,9 +910,7 @@ static void openSessionLaps(int i) {
 static void handlePush() {
   switch (currentScreen) {
     case SCR_STATUS:
-      if (!recordingEnabled && detectionEffectivelyComplete()) { // BACK arrete desormais (pas PUSH), cf. handleBack
-        startRecording();
-      }
+      simAdvanceDemoState(); // cycle recherche -> circuit reconnu -> REC -> circuit reconnu (stop)
       break;
 
     case SCR_CIRCUIT:
@@ -1375,12 +965,8 @@ static void handlePush() {
 static void handleBack() {
   switch (currentScreen) {
     case SCR_STATUS:
-      if (recordingEnabled) {
-        stopRecording(); // BACK arrete l'enregistrement (a la place de PUSH)
-      } else {
-        cancelNewCircuitCapture(); // no-op si rien n'est arme
-        goToScreen(SCR_CIRCUIT);
-      }
+      cancelNewCircuitCapture(); // no-op ici, laisse pour coherence avec les autres ecrans
+      goToScreen(SCR_CIRCUIT);
       break;
 
     case SCR_CIRCUIT:
@@ -1416,7 +1002,7 @@ static void handleBack() {
 void setup() {
   Serial.begin(115200);
   delay(1000);
-  Serial.println("=== firmware_191 -- GPS/CourseManager/SD reels (Circuit/Nouveau circuit/Connexion/Session/Reglages) ===");
+  Serial.println("=== display_only_191 -- navigation (Circuit/Nouveau circuit/Connexion/Session/Reglages) ===");
 
   I2C_master_Init();
   Serial.println("[1/5] I2C partage ok");
@@ -1425,23 +1011,7 @@ void setup() {
   displayInit();
   Serial.println("[3/5] Ecran + LVGL ok");
 
-  initGps();
-  Serial.println("[3.5/5] GPS ok (reel -- plus simule)");
-
-  setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);
-  tzset();
-
-  if (!LittleFS.begin(true)) {
-    Serial.println("LittleFS: echec de montage (meme apres formatage) -- circuits/sessions indisponibles.");
-  }
-  bool sdOk = initSdLogStorage();
-  Serial.printf("SD (SDMMC) : %s -- logs GPS detailles sur %s.\n", sdOk ? "montee" : "absente/en panne", sdOk ? "carte SD" : "LittleFS (repli)");
-  migrateLittleFsLogsToSd();
-
-  loadActiveCircuitsIntoTracks();
-  courseManager = new CourseManager(myTracks, 7.0, &Serial);
-
-  adc_bsp_init();
+  Serial.println("[3.5/5] GPS/SD/batterie simules -- aucune init hardware necessaire ici.");
 
   pinMode(BACK_BUTTON, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(BACK_BUTTON), backButtonISR, FALLING);
@@ -1480,24 +1050,13 @@ void setup() {
     lvglUnlock();
   }
 
-  Serial.println("Pret. Statut: PUSH avance (recherche->detecte->REC), BACK arrete le REC ou va sur Circuit. Anneau: tourne = change d'ecran, PUSH = selection, BACK = retour.");
+  Serial.println("Pret. Statut: PUSH fait tourner recherche->detecte->REC->detecte (stop). BACK va sur Circuit. Anneau: tourne = change d'ecran, PUSH = selection, BACK = retour.");
 }
 
 void loop() {
   unsigned long nowMs = millis();
-  pollGps();
-  gpsUpdateFromLiveData();
-
-  if (newGpsData) {
-    newGpsData = false;
-    double lat = liveData.latitude / 1e7;
-    double lng = liveData.longitude / 1e7;
-    float altM = liveData.wgsAltitude / 1000.0f;
-    float speedKnots = liveData.speedMmPerS / 514.444f; // mm/s -> noeuds (unite DovesLapTimer)
-    processGpsFix(lat, lng, altM, speedKnots, nowMs);
-    logGpsRow();          // no-op si REC off
-    checkLapCompletion();  // no-op si REC off
-  }
+  simGpsTick();
+  checkLapCompletion(); // simule la fin d'un tour toutes les SIM_LAP_DURATION_MS pendant le REC -- no-op si REC off
 
   if (rotaryEncoder.isEncoderButtonClicked()) {
     handlePush();
