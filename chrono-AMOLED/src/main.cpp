@@ -1000,17 +1000,17 @@ static void buildStatusScreen() {
   lv_label_set_text(lblRecHint, "PRESS REC");
 
   lblDernier = lv_label_create(scrStatus);
-  lv_obj_set_style_text_font(lblDernier, &lv_font_teko_medium_34, 0);
+  lv_obj_set_style_text_font(lblDernier, &lv_font_teko_bold_38, 0); // etait medium_34, un poil trop petit
   lv_obj_set_style_text_color(lblDernier, lv_color_white(), 0);
-  lv_obj_align(lblDernier, LV_ALIGN_TOP_LEFT, 4, 168);
+  lv_obj_align(lblDernier, LV_ALIGN_TOP_LEFT, 4, 162);
 
   lblBest = lv_label_create(scrStatus);
-  lv_obj_set_style_text_font(lblBest, &lv_font_teko_medium_34, 0);
+  lv_obj_set_style_text_font(lblBest, &lv_font_teko_bold_38, 0); // etait medium_34, un poil trop petit
   lv_obj_set_style_text_color(lblBest, lv_color_white(), 0);
-  lv_obj_align(lblBest, LV_ALIGN_TOP_LEFT, 4, 204);
+  lv_obj_align(lblBest, LV_ALIGN_TOP_LEFT, 4, 202);
 
   lblTours = lv_label_create(scrStatus);
-  lv_obj_set_style_text_font(lblTours, &lv_font_teko_medium_34, 0);
+  lv_obj_set_style_text_font(lblTours, &lv_font_teko_bold_38, 0); // etait medium_34, aligne sur Dernier/Best
   lv_obj_set_style_text_color(lblTours, lv_color_white(), 0);
   lv_obj_align(lblTours, LV_ALIGN_BOTTOM_RIGHT, -4, -4);
 }
@@ -1049,9 +1049,9 @@ static void buildConfirmStopScreen() {
   lv_obj_align(lblReprendre, LV_ALIGN_CENTER, 0, -10);
 
   lv_obj_t* lblBack = lv_label_create(scrConfirmStop);
-  lv_obj_set_style_text_font(lblBack, &lv_font_teko_medium_26, 0);
+  lv_obj_set_style_text_font(lblBack, &lv_font_teko_bold_38, 0); // etait medium_26, aligne sur "PUSH pour reprendre"
   lv_obj_set_style_text_color(lblBack, lv_color_white(), 0);
-  lv_label_set_text(lblBack, "PRESS BACK pour stop definitif");
+  lv_label_set_text(lblBack, "BACK pour arreter");
   lv_obj_align(lblBack, LV_ALIGN_CENTER, 0, 60);
 
   lblConfirmCountdown = lv_label_create(scrConfirmStop);

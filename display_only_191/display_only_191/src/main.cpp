@@ -1,29 +1,36 @@
 /**
- * Chrono GPS moto piste -- sous-projet "display_only_191"
- * ---------------------------------------------------------
- * Meme principe que le display_only du projet TFT : ecran + encodeur
- * EC11 + bouton BACK, AUCUNE dependance GPS/SD/batterie/WiFi reelle --
- * toutes les donnees viennent d'une couche de simulation en RAM.
+ * Chrono GPS moto piste -- display_only_191 (banc de test d'affichage)
+ * ----------------------------------------------------------------------
+ * Repris a l'identique du vrai firmware (firmware_191, meme repo) cote
+ * ecrans/navigation/tactile -- AUCUNE dependance GPS/SD/batterie/WiFi
+ * reelle ici, tout est simule en RAM (cf. bloc "Simulation moteur" plus
+ * bas). But : calibrer/valider l'affichage sur le banc avant de reporter
+ * les changements dans firmware_191.
  *
- * Navigation (encodeur conserve, pas de menu liste separe) :
+ * Ecran + bouton PUSH simple (rotatif EC11 retire du vrai firmware le
+ * 27/07, jamais cable ici) + bouton BACK.
+ *
+ * Navigation (pas de menu liste separe) :
  *   - Depuis Statut : BACK -> ecran Circuit (1er ecran de l'anneau)
- *   - Anneau Circuit -> Connexion -> Session -> Reglages -> Circuit...
- *     (rotation encodeur fait tourner l'anneau)
- *   - Sur Circuit/Session/Reglages : PUSH entre en mode selection
- *     (l'encodeur change de role, selectionne un element de la liste),
- *     re-PUSH valide et sort du mode selection.
+ *   - Anneau Circuit -> Nouveau circuit -> Connexion -> Session -> Reglages
+ *     -> Circuit... (swipe tactile uniquement depuis le retrait du rotatif)
+ *   - Sur Circuit/Session/Reglages : PUSH entre en mode selection,
+ *     re-PUSH valide -- ou tap direct sur une ligne (equivalent en un
+ *     seul geste, et desormais le moyen normal vu l'absence de rotation).
  *   - BACK depuis un ecran de l'anneau (hors mode selection) -> Statut.
  *   - BACK en mode selection -> annule, sort du mode selection (reste
  *     sur le meme ecran, anneau).
- *   - Session -> PUSH valide ouvre les tours de la session (ecran
- *     feuille), BACK y revient a la liste des sessions.
- *   - Reglages -> PUSH valide ouvre WiFi (ecran feuille), BACK y
- *     revient directement a Statut (comme le TFT d'origine).
+ *   - Session -> PUSH/tap ouvre les tours de la session (ecran feuille),
+ *     BACK y revient a la liste des sessions.
+ *   - Reglages -> PUSH/tap ouvre WiFi (ecran feuille, encore factice),
+ *     BACK y revient directement a Statut.
+ *   - Statut : PUSH ou tap sur le bouton REC demarre l'enregistrement
+ *     (si circuit detecte) ; BACK l'arrete (PUSH desarme pendant le REC,
+ *     par securite).
  */
 
 #include <Arduino.h>
 #include <lvgl.h>
-#include <AiEsp32RotaryEncoder.h>
 #include <limits.h>
 #include <math.h>
 #include <vector>
@@ -36,30 +43,45 @@
 #include "splash_pigteam.h"
 
 // display_only_191 -- banc de test ecran : AUCUNE dependance GPS/SD/
-// batterie reelle, tout est simule en RAM (cf. bloc "Simulation moteur"
-// plus bas). CourseManager/GpsManager/SdLogStorage/adc_bsp restent dans
-// lib/ (repris tels quels du firmware reel pour reference future) mais
-// ne sont plus inclus ni appeles ici.
+// batterie/WiFi reelle, tout est simule en RAM (cf. bloc "Simulation
+// moteur" plus bas). CourseManager/GpsManager/SdLogStorage/adc_bsp/
+// WebServerManager restent dans lib/ (repris tels quels du firmware
+// reel pour reference future) mais ne sont plus inclus ni appeles ici.
 
 // ===================== Pins (valides au bring-up 1.91) =====================
-#define ENCODER_CLK   2
-#define ENCODER_DT    3
-#define ENCODER_PUSH  10
+// Rotatif physiquement retire (27/07) -- remplace par un bouton poussoir
+// simple sur la meme broche (ENCODER_CLK/DT ne sont plus cables). La
+// navigation anneau/listes, auparavant pilotee par la rotation, repose
+// desormais entierement sur le tactile (swipe pour l'anneau, tap direct
+// pour les listes -- deja fonctionnel en parallele avant ce changement,
+// cf. ringScreenGestureCb() et les commentaires "Tap: choisir").
+#define PUSH_BUTTON   10
 #define BACK_BUTTON   14
 
-AiEsp32RotaryEncoder rotaryEncoder = AiEsp32RotaryEncoder(ENCODER_DT, ENCODER_CLK, ENCODER_PUSH, -1, 4);
 volatile bool backButtonPressed = false;
 static unsigned long lastBackIsrMs = 0;
-static const unsigned long BACK_DEBOUNCE_MS = 200;
+// Porte a 500ms (28/07, etait 200ms) : rebond/bruit constate sur BACK
+// juste apres le retrait du rotatif -- un vrai double-appui volontaire ne
+// se produit jamais en moins d'une demi-seconde, donc aucune perte de
+// reactivite percue. A verifier aussi cote materiel (soudure/connecteur
+// deranges en manipulant a cote pendant le remplacement du rotatif).
+static const unsigned long BACK_DEBOUNCE_MS = 500;
 
-void IRAM_ATTR readEncoderISR() {
-  rotaryEncoder.readEncoder_ISR();
-}
+volatile bool pushButtonPressed = false;
+static unsigned long lastPushIsrMs = 0;
+static const unsigned long PUSH_DEBOUNCE_MS = 200;
+
 void IRAM_ATTR backButtonISR() {
   unsigned long now = millis();
   if (now - lastBackIsrMs < BACK_DEBOUNCE_MS) return;
   lastBackIsrMs = now;
   backButtonPressed = true;
+}
+void IRAM_ATTR pushButtonISR() {
+  unsigned long now = millis();
+  if (now - lastPushIsrMs < PUSH_DEBOUNCE_MS) return;
+  lastPushIsrMs = now;
+  pushButtonPressed = true;
 }
 
 // mm:ss.mmm
@@ -71,11 +93,23 @@ static void formatLapTime(unsigned long ms, char* buf, size_t bufSize) {
   snprintf(buf, bufSize, "%lu:%02lu.%03lu", minutes, seconds, millisPart);
 }
 
-// ===================== Horloge simulee (pas de fix GPS UTC reel) =====================
+// ===================== Simulation moteur (banc de test, sans GPS/SD/batterie/WiFi reels) =====================
 //
-// Demarre a une heure arbitraire (14:32:00) et avance avec millis() --
-// suffisant pour calibrer l'affichage de l'heure sur le banc, sans
-// dependre d'un fix GPS.
+// Repris a l'identique de firmware_191 cote signatures de fonctions
+// (detectionEffectivelyComplete, getDisplayState, recordingEnabled,
+// startRecording/stopRecording, myTracks, activateAutoMode/
+// activateManualCourse, armNewCircuitCapture/cancelNewCircuitCapture,
+// readBatteryPercent, loadSessionSummaries/loadLapsForSession,
+// gpsFixStatus/gpsNumSVs/gpsSpeedKmh/gpsActive) -- seul le contenu
+// change, tout vient d'une simulation RAM plutot que du GPS/SD/ADC
+// reels. Ecrans/navigation/tactile (plus bas) sont identiques au vrai
+// firmware et n'ont pas besoin de savoir que c'est simule.
+
+// mm:ss.mmm -- deja definie plus haut (juste apres les ISR PUSH/BACK),
+// reutilisee ici sans redefinition.
+
+// ----- Horloge simulee (pas de fix GPS UTC reel) -----
+// Demarre a une heure arbitraire (14:32:00) et avance avec millis().
 static void getLocalDateTime(char* dateBuf, size_t dateBufSize, char* timeBuf, size_t timeBufSize) {
   unsigned long totalSec = (millis() / 1000) + (14UL * 3600 + 32UL * 60);
   unsigned long h = (totalSec / 3600) % 24;
@@ -85,37 +119,16 @@ static void getLocalDateTime(char* dateBuf, size_t dateBufSize, char* timeBuf, s
   if (timeBuf) snprintf(timeBuf, timeBufSize, "%02lu:%02lu:%02lu", h, m, s);
 }
 
-// Inverse de formatLapTime() -- "M:SS.mmm" -> millisecondes. ULONG_MAX si
-// le format ne correspond pas (ex. "--:--.---" = pas de temps).
-static unsigned long parseLapTimeStr(const String& s) {
-  int colon = s.indexOf(':');
-  int dot = s.indexOf('.');
-  if (colon < 0 || dot < 0) return ULONG_MAX;
-  long minutes = s.substring(0, colon).toInt();
-  long seconds = s.substring(colon + 1, dot).toInt();
-  long millisPart = s.substring(dot + 1).toInt();
-  if (minutes == 0 && seconds == 0 && millisPart == 0 && s.charAt(0) != '0') return ULONG_MAX;
-  return (unsigned long)(minutes * 60000 + seconds * 1000 + millisPart);
-}
-
-// ===================== Simulation moteur (banc de test, sans GPS/SD/batterie reels) =====================
-//
-// Meme principe que le display_only du projet TFT d'origine : un seul
-// PUSH (depuis Statut) fait avancer un cycle Recherche -> Circuit
-// reconnu -> REC -> Circuit reconnu (stop), toutes les donnees
-// affichees (position/tours/vitesse/batterie) viennent d'une couche de
-// simulation en RAM. But : placer/calibrer rapidement les ecrans sur
-// le banc, sans GPS/SD/batterie branches. La vraie logique
-// (CourseManager/GpsManager/SdLogStorage/adc_bsp, dans lib/) est
-// portee dans firmware_191 une fois la mise en page validee ici.
-
-enum DemoState { DEMO_SEARCHING, DEMO_DETECTED, DEMO_RECORDING };
-static DemoState demoState = DEMO_SEARCHING;
+// ----- GPS simule (juste de quoi remplir Fix/Sat/vitesse a l'ecran) -----
+static bool gpsActive = true;
+static int gpsFixStatus = 3;
+static int gpsNumSVs = 9;
+static float gpsSpeedKmh = 0.0f;
 
 // ----- Circuits simules (pas de circuits.csv, pas de LittleFS necessaire) -----
 static const char* DEMO_COURSE_NAMES[] = { "PigTeam_track", "Croix-en-Ternois", "Circuit Carole" };
 static const int DEMO_COURSE_COUNT = 3;
-static int demoSelectedCourse = 0; // 0 = Auto (nom generique), 1..N = circuit force manuellement
+static int demoSelectedCourse = 0; // 0 = Auto, 1..N = circuit force manuellement
 
 struct SimCourseEntry { const char* name; };
 struct SimTrackList {
@@ -127,22 +140,49 @@ static SimTrackList myTracks = {
   { { DEMO_COURSE_NAMES[0] }, { DEMO_COURSE_NAMES[1] }, { DEMO_COURSE_NAMES[2] } }
 };
 
-static void activateAutoMode() { demoSelectedCourse = 0; }
+// true une fois qu'un circuit est "detecte" (choisi sur l'ecran Circuit,
+// Auto ou manuel) -- equivalent banc de detectionEffectivelyComplete()
+// reel (geofencing+GPS). Redevient false apres un arret definitif
+// confirme (SCR_CONFIRM_STOP -> BACK -> activateAutoMode(), cf. plus
+// bas, exactement comme le reset courseManager reel) ou pendant une
+// capture de nouveau circuit armee.
+// Detecte "PigTeam_track" par defaut au demarrage (contrairement au
+// reel, qui demarre toujours non-detecte en attendant un fix GPS) --
+// confort banc : PUSH fonctionne des l'ecran Statut sans devoir
+// d'abord passer par l'ecran Circuit pour choisir un circuit.
+static bool simDetected = true;
+
+static bool newCircuitCaptureArmed = false;
+static bool newCircuitAutoSaved = false;
+
+static void activateAutoMode() {
+  demoSelectedCourse = 0;
+  simDetected = false; // comme le vrai courseManager->reset() -- redemarre la detection
+  newCircuitCaptureArmed = false;
+  Serial.println("Retour en mode detection automatique (simule).");
+}
 static void activateManualCourse(int index) {
   if (index < 0 || index >= myTracks.courseCount) return;
   demoSelectedCourse = index + 1;
+  simDetected = true; // choisir un circuit precis = detection immediate, comme au reel
+  newCircuitCaptureArmed = false;
+  Serial.printf("Circuit force (simule) : %s\n", myTracks.courses[index].name);
 }
-// Ecran "Nouveau circuit" garde a but de calibration d'UI -- pas de
-// vraie capture GPS ici, juste de quoi tester l'ecran/le bouton.
-static void armNewCircuitCapture() { Serial.println("Capture nouveau circuit (simulee -- juste pour tester l'ecran)."); }
-static void cancelNewCircuitCapture() {}
+static void armNewCircuitCapture() {
+  simDetected = false; // comme courseManager->reset() au reel -- suspend la detection pendant la capture
+  newCircuitCaptureArmed = true;
+  newCircuitAutoSaved = false;
+  Serial.println("Capture nouveau circuit armee (simulee -- juste pour tester l'ecran).");
+}
+static void cancelNewCircuitCapture() {
+  newCircuitCaptureArmed = false;
+}
 
+static bool detectionEffectivelyComplete() { return simDetected; }
 static const char* getActiveCourseNameForDisplay() {
-  if (demoState == DEMO_SEARCHING) return "Detection...";
+  if (newCircuitCaptureArmed) return newCircuitAutoSaved ? "Circuit capture !" : "CAPTURE NEW TRACK";
+  if (!detectionEffectivelyComplete()) return "Detection...";
   return DEMO_COURSE_NAMES[demoSelectedCourse == 0 ? 0 : demoSelectedCourse - 1];
-}
-static bool detectionEffectivelyComplete() {
-  return demoState != DEMO_SEARCHING;
 }
 
 // ----- Sessions/tours simules (en RAM, pas de sessions.csv) -----
@@ -174,7 +214,11 @@ static unsigned long simLapStartMs = 0;
 static unsigned long simLastLapMs = 0;
 static unsigned long simBestLapMs = ULONG_MAX;
 static int simLapsCount = 0;
-static const unsigned long SIM_LAP_DURATION_MS = 22000; // un "tour" toutes les ~22s en REC, pour voir defiler l'ecran
+// Duree du tour en cours, tiree au hasard a chaque tour (8-29s) --
+// permet de voir varier dernier/meilleur tour sans attendre un temps
+// fixe, utile pour verifier que les deux se mettent a jour correctement.
+static unsigned long simCurrentLapTargetMs = 20000;
+static unsigned long randomLapDurationMs() { return (unsigned long)random(8000, 30000); } // [8s, 30s[
 
 static void getDisplayState(unsigned long& currentLapMs, unsigned long& bestLapMs, bool& hasBest, int& lapsCount) {
   currentLapMs = recordingEnabled ? (millis() - simLapStartMs) : 0;
@@ -188,6 +232,7 @@ static void startRecording() {
   if (recordingEnabled) return;
   recordingEnabled = true;
   simLapStartMs = millis();
+  simCurrentLapTargetMs = randomLapDurationMs();
   simLastLapMs = 0;
   simBestLapMs = ULONG_MAX;
   simLapsCount = 0;
@@ -208,16 +253,17 @@ static void startRecording() {
 static void stopRecording() {
   if (!recordingEnabled) return;
   recordingEnabled = false;
-  Serial.println("REC OFF (simule)");
+  Serial.println("REC OFF (simule -- pause, le circuit reste detecte)");
 }
 
-// Simule la fin d'un tour toutes les SIM_LAP_DURATION_MS pendant le REC.
+// Simule la fin d'un tour a une duree aleatoire (8-29s) pendant le REC.
 static void checkLapCompletion() {
   if (!recordingEnabled) return;
   unsigned long elapsed = millis() - simLapStartMs;
-  if (elapsed < SIM_LAP_DURATION_MS) return;
+  if (elapsed < simCurrentLapTargetMs) return;
 
   simLapStartMs = millis();
+  simCurrentLapTargetMs = randomLapDurationMs(); // tire la duree du prochain tour
   simLastLapMs = elapsed;
   if (simLastLapMs < simBestLapMs) simBestLapMs = simLastLapMs;
   simLapsCount++;
@@ -236,19 +282,6 @@ static void checkLapCompletion() {
   Serial.printf("Tour %d simule : %lu ms\n", simLapsCount, simLastLapMs);
 }
 
-// ----- Cycle demo pilote au PUSH (ou tap REC) depuis l'ecran Statut -----
-static void simAdvanceDemoState() {
-  if (demoState == DEMO_SEARCHING) {
-    demoState = DEMO_DETECTED;
-  } else if (demoState == DEMO_DETECTED) {
-    demoState = DEMO_RECORDING;
-    startRecording();
-  } else { // DEMO_RECORDING
-    demoState = DEMO_DETECTED;
-    stopRecording();
-  }
-}
-
 // ----- Batterie simulee (cycle lent aller-retour, pas de lecture ADC) -----
 static int readBatteryPercent() {
   const unsigned long period = 60000; // cycle complet ~60s : 100% -> 20% -> 100%
@@ -259,22 +292,44 @@ static int readBatteryPercent() {
   return 20 + (int)(ratio * 80.0f);
 }
 
-// ----- GPS simule (juste de quoi remplir Fix/Sat/vitesse a l'ecran) -----
-static bool gpsActive = true;
-static uint8_t gpsFixStatus = 3;
-static uint8_t gpsNumSVs = 9;
-static float gpsSpeedKmh = 0.0f;
-
+// ----- Tick GPS simule, appele une fois par tour de loop() -----
 static void simGpsTick() {
-  gpsNumSVs = 8 + (uint8_t)((millis() / 3000) % 5);
+  gpsNumSVs = 8 + (int)((millis() / 3000) % 5);
   gpsSpeedKmh = recordingEnabled ? (60.0f + 40.0f * sinf(millis() / 4000.0f)) : 0.0f;
 }
 
+// ----- WiFi simule (pas de WebServerManager reel) -----
+static const char* SIM_WIFI_SSID = "PigTeam-Chrono (simule)";
+static const char* SIM_WIFI_IP = "192.168.4.1";
+
 // ===================== Navigation =====================
 
-enum AppScreen { SCR_STATUS, SCR_CIRCUIT, SCR_CONNEXION, SCR_SESSION_LIST, SCR_SESSION_LAPS, SCR_SETTINGS, SCR_WIFI, SCR_NEW_CIRCUIT };
+enum AppScreen { SCR_STATUS, SCR_CIRCUIT, SCR_CONNEXION, SCR_SESSION_LIST, SCR_SESSION_LAPS, SCR_SETTINGS, SCR_WIFI, SCR_NEW_CIRCUIT, SCR_CONFIRM_STOP };
 static AppScreen currentScreen = SCR_STATUS;
-static bool selectingMode = false; // true = encodeur en mode "selection dans la liste" (Circuit/Session/Reglages)
+// Duree max sur SCR_CONFIRM_STOP avant arret definitif automatique --
+// filet de securite si on oublie de valider (BACK) ou de reprendre
+// (tactile/PUSH) en quittant la piste. Sans ca, l'ecran resterait arme
+// indefiniment et un faux contact tactile pourrait relancer
+// l'enregistrement (cf. bug du 27/07 -- circuit jamais desarme apres stop).
+static const unsigned long CONFIRM_STOP_TIMEOUT_MS = 300000UL; // 5 minutes
+static unsigned long confirmStopEnteredMs = 0;
+// Faux contact electrique (bruit sur l'alim, pas forcement un vrai doigt)
+// = evenement quasi instantane. Un vrai choix humain de REPRENDRE prend
+// toujours au moins quelques centaines de ms de reaction -- on ignore donc
+// REPRENDRE (tactile/PUSH) pendant cette fenetre courte apres l'ouverture
+// de l'ecran. BACK (arret definitif) n'est PAS concerne : c'est toujours
+// la direction "sure", pas besoin de la retarder.
+static const unsigned long CONFIRM_STOP_INPUT_GRACE_MS = 600UL;
+// Idem, mais cote ecran Statut : une fois l'arret DEFINITIF confirme, le
+// geofencing (rayon 15km, cf. GEOFENCE_MAX_DISTANCE_M) peut redetecter le
+// circuit et rearmer le bouton REC en ~1s si on est pres de la piste --
+// constate au banc (cf. log Serial du 27/07 : "Retour en mode detection
+// automatique" suivi de "REC ON" en une poignee de lignes). Cette fenetre
+// protege specifiquement le REC de l'ecran Statut juste apres un arret
+// definitif, en plus de la protection REPRENDRE ci-dessus.
+static unsigned long lastDefinitiveStopMs = 0;
+static const unsigned long STATUS_REC_GRACE_AFTER_STOP_MS = 1500UL;
+static bool selectingMode = false; // true = mode "selection dans la liste" (Circuit/Session/Reglages), arme par PUSH
 
 static int ringIndex = 0;        // 0=Circuit,1=NouveauCircuit,2=Connexion,3=Session,4=Reglages
 static int circuitSelection = 0; // 0=Auto, 1..N=courses (plus de "Nouveau circuit" ici, ecran dedie desormais)
@@ -289,12 +344,22 @@ static lv_obj_t* scrSessionLaps;
 static lv_obj_t* scrSettings;
 static lv_obj_t* scrWifi;
 static lv_obj_t* scrNewCircuit;
+static lv_obj_t* scrConfirmStop;
 
 static bool screenDirty = true; // force un redessin complet au prochain refresh
 
+// WiFi.softAP()/stopDownloadMode() sont lents (radio) -- ne JAMAIS les
+// appeler directement depuis un callback tactile LVGL (deja execute
+// avec le mutex LVGL tenu par la tache de rendu -- les bloquer dessus
+// gele tout l'affichage/tactile pendant leur duree, terrain favorable
+// aux plantages). On se contente ici de positionner un flag ; le vrai
+// appel se fait dans loop(), hors de toute section verrouillee.
+static bool wifiStartRequested = false;
+static bool wifiStopRequested = false;
+
 static void setEncoderForRing() {
-  rotaryEncoder.setBoundaries(0, 4, true);
-  rotaryEncoder.setEncoderValue(ringIndex);
+  // No-op depuis le retrait du rotatif (27/07) -- gardee pour ne pas
+  // toucher aux appels dans goToScreen(), l'anneau se navigue au swipe.
 }
 
 static void goToScreen(AppScreen s) {
@@ -310,12 +375,13 @@ static void goToScreen(AppScreen s) {
     case SCR_SETTINGS:     ringIndex = 4; lv_scr_load(scrSettings); setEncoderForRing(); break;
     case SCR_SESSION_LAPS: lv_scr_load(scrSessionLaps); break;
     case SCR_WIFI:         lv_scr_load(scrWifi); break;
+    case SCR_CONFIRM_STOP: lv_scr_load(scrConfirmStop); break;
   }
 }
 
 static void goToRingScreen(int idx) {
   // idx: 0=Circuit,1=NouveauCircuit,2=Connexion,3=Session,4=Reglages --
-  // appele quand l'encodeur tourne pour changer d'ecran dans l'anneau
+  // appele au swipe pour changer d'ecran dans l'anneau (rotatif retire)
   // (hors mode selection).
   switch (idx) {
     case 0: goToScreen(SCR_CIRCUIT); break;
@@ -327,7 +393,7 @@ static void goToRingScreen(int idx) {
 }
 
 // Glissement gauche/droite sur un ecran de l'anneau -- change d'ecran,
-// en complement de la rotation encodeur. Ignore en mode selection
+// seul mecanisme de navigation de l'anneau depuis le retrait du rotatif. Ignore en mode selection
 // (meme logique que la rotation : pas de changement d'ecran quand on
 // est en train de choisir un element dans une liste).
 static void ringScreenGestureCb(lv_event_t* e) {
@@ -356,19 +422,10 @@ static lv_obj_t* lblRec;
 static lv_obj_t* lblBatt;
 static lv_obj_t* lblBig;
 static lv_obj_t* lblClock;
-static lv_obj_t* btnRec;
-static lv_obj_t* lblBtnRecText;
+static lv_obj_t* lblRecHint; // "PRESS REC", cf. commentaire pres de sa creation
 static lv_obj_t* lblDernier;
 static lv_obj_t* lblBest;
 static lv_obj_t* lblTours;
-
-// Tap sur le bouton REC (visible uniquement en mode "circuit detecte") --
-// equivalent tactile du PUSH encodeur pour cette transition precise.
-static void btnRecClickedCb(lv_event_t* e) {
-  if (demoState == DEMO_DETECTED) {
-    simAdvanceDemoState(); // -> DEMO_RECORDING
-  }
-}
 
 static void buildStatusScreen() {
   scrStatus = lv_obj_create(NULL);
@@ -398,33 +455,85 @@ static void buildStatusScreen() {
   lv_obj_set_style_text_font(lblClock, &lv_font_teko_bold_56, 0); // taille intermediaire (etait bold_84, trop gros)
   lv_obj_set_style_text_color(lblClock, lv_color_white(), 0);
 
-  btnRec = lv_btn_create(scrStatus);
-  lv_obj_set_size(btnRec, 220, 70);
-  lv_obj_set_style_bg_color(btnRec, lv_palette_main(LV_PALETTE_RED), 0);
-  lv_obj_set_style_bg_color(btnRec, lv_palette_darken(LV_PALETTE_RED, 2), LV_STATE_PRESSED); // retour visuel a l'appui
-  lv_obj_set_style_radius(btnRec, 14, 0);
-  lv_obj_add_event_cb(btnRec, btnRecClickedCb, LV_EVENT_CLICKED, NULL);
-
-  lblBtnRecText = lv_label_create(btnRec);
-  lv_obj_set_style_text_font(lblBtnRecText, &lv_font_teko_bold_38, 0);
-  lv_obj_set_style_text_color(lblBtnRecText, lv_color_white(), 0);
-  lv_label_set_text(lblBtnRecText, "REC");
-  lv_obj_center(lblBtnRecText);
+  // Tactile retire (28/07, soir) -- theorie confirmee par un test dedie :
+  // 2 redemarrages fantomes avec la trace "[trigger] REC via tactile" en
+  // quelques minutes, sans aucun contact humain, alors meme que le bug
+  // d'underflow independant etait deja corrige. Faux contact capacitif
+  // confirme comme cause reelle et distincte -- cf. discussion du 28/07.
+  // Seul le PUSH (bouton simple, contact mecanique, insensible au bruit
+  // electrique) demarre l'enregistrement -- cf. handlePush()/SCR_STATUS.
+  lblRecHint = lv_label_create(scrStatus);
+  lv_obj_set_style_text_font(lblRecHint, &lv_font_teko_bold_38, 0);
+  lv_obj_set_style_text_color(lblRecHint, lv_palette_main(LV_PALETTE_RED), 0);
+  lv_label_set_text(lblRecHint, "PRESS REC");
 
   lblDernier = lv_label_create(scrStatus);
-  lv_obj_set_style_text_font(lblDernier, &lv_font_teko_medium_34, 0);
+  lv_obj_set_style_text_font(lblDernier, &lv_font_teko_bold_38, 0); // etait medium_34, un poil trop petit
   lv_obj_set_style_text_color(lblDernier, lv_color_white(), 0);
-  lv_obj_align(lblDernier, LV_ALIGN_TOP_LEFT, 4, 168);
+  lv_obj_align(lblDernier, LV_ALIGN_TOP_LEFT, 4, 162);
 
   lblBest = lv_label_create(scrStatus);
-  lv_obj_set_style_text_font(lblBest, &lv_font_teko_medium_34, 0);
+  lv_obj_set_style_text_font(lblBest, &lv_font_teko_bold_38, 0); // etait medium_34, un poil trop petit
   lv_obj_set_style_text_color(lblBest, lv_color_white(), 0);
-  lv_obj_align(lblBest, LV_ALIGN_TOP_LEFT, 4, 204);
+  lv_obj_align(lblBest, LV_ALIGN_TOP_LEFT, 4, 202);
 
   lblTours = lv_label_create(scrStatus);
-  lv_obj_set_style_text_font(lblTours, &lv_font_teko_medium_34, 0);
+  lv_obj_set_style_text_font(lblTours, &lv_font_teko_bold_38, 0); // etait medium_34, aligne sur Dernier/Best
   lv_obj_set_style_text_color(lblTours, lv_color_white(), 0);
   lv_obj_align(lblTours, LV_ALIGN_BOTTOM_RIGHT, -4, -4);
+}
+
+// ===================== Confirmation d'arret (a la RaceChrono) =====================
+// BACK depuis SCR_STATUS pendant l'enregistrement ne stoppe plus
+// directement -- il ouvre cet ecran. Le PUSH relance aussitot, le
+// circuit etant reste arme (courseManager pas reset par stopRecording()).
+// BACK confirme l'arret definitif (desarme le circuit, cf. handleBack()).
+// Un timeout de securite (CONFIRM_STOP_TIMEOUT_MS) confirme automatiquement
+// l'arret si on oublie de choisir avant de prendre la route. Aucun bouton
+// tactile REPRENDRE (28/07) : preuve au Serial d'un faux contact capacitif
+// declenchant l'enregistrement seul -- cf. commentaire pres de lblRecHint
+// dans buildStatusScreen().
+static lv_obj_t* lblConfirmCountdown;
+
+static void buildConfirmStopScreen() {
+  scrConfirmStop = lv_obj_create(NULL);
+  lv_obj_set_style_bg_color(scrConfirmStop, lv_color_black(), 0);
+  lv_obj_clear_flag(scrConfirmStop, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t* lblTitle = lv_label_create(scrConfirmStop);
+  lv_obj_set_style_text_font(lblTitle, &lv_font_teko_medium_34, 0);
+  lv_obj_set_style_text_color(lblTitle, lv_palette_main(LV_PALETTE_ORANGE), 0);
+  lv_label_set_text(lblTitle, "Enregistrement en pause");
+  lv_obj_align(lblTitle, LV_ALIGN_TOP_MID, 0, 20);
+
+  // Pas de widget bouton ici (28/07) -- meme raison que lblRecHint, cf.
+  // commentaire pres de sa creation dans buildStatusScreen(). Simple
+  // texte d'etat, seul le PUSH declenche la reprise -- cf.
+  // handlePush()/SCR_CONFIRM_STOP.
+  lv_obj_t* lblReprendre = lv_label_create(scrConfirmStop);
+  lv_obj_set_style_text_font(lblReprendre, &lv_font_teko_bold_38, 0);
+  lv_obj_set_style_text_color(lblReprendre, lv_palette_main(LV_PALETTE_GREEN), 0);
+  lv_label_set_text(lblReprendre, "PUSH pour reprendre");
+  lv_obj_align(lblReprendre, LV_ALIGN_CENTER, 0, -10);
+
+  lv_obj_t* lblBack = lv_label_create(scrConfirmStop);
+  lv_obj_set_style_text_font(lblBack, &lv_font_teko_bold_38, 0); // etait medium_26, aligne sur "PUSH pour reprendre"
+  lv_obj_set_style_text_color(lblBack, lv_color_white(), 0);
+  lv_label_set_text(lblBack, "BACK pour arreter");
+  lv_obj_align(lblBack, LV_ALIGN_CENTER, 0, 60);
+
+  lblConfirmCountdown = lv_label_create(scrConfirmStop);
+  lv_obj_set_style_text_font(lblConfirmCountdown, &lv_font_teko_medium_26, 0);
+  lv_obj_set_style_text_color(lblConfirmCountdown, lv_palette_main(LV_PALETTE_GREY), 0);
+  lv_obj_align(lblConfirmCountdown, LV_ALIGN_BOTTOM_MID, 0, -8);
+}
+
+static void refreshConfirmStopScreen() {
+  long remainingS = (long)(CONFIRM_STOP_TIMEOUT_MS - (millis() - confirmStopEnteredMs)) / 1000;
+  if (remainingS < 0) remainingS = 0;
+  char buf[32];
+  snprintf(buf, sizeof(buf), "Arret auto dans %lds", remainingS);
+  lv_label_set_text(lblConfirmCountdown, buf);
 }
 
 static void updateStatusScreen(unsigned long nowMs) {
@@ -465,10 +574,10 @@ static void updateStatusScreen(unsigned long nowMs) {
     lv_obj_clear_flag(lblClock, LV_OBJ_FLAG_HIDDEN);
 
     if (circuitDetected) {
-      lv_obj_align(btnRec, LV_ALIGN_BOTTOM_RIGHT, -4, -4);
-      lv_obj_clear_flag(btnRec, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_align(lblRecHint, LV_ALIGN_BOTTOM_RIGHT, -4, -4);
+      lv_obj_clear_flag(lblRecHint, LV_OBJ_FLAG_HIDDEN);
     } else {
-      lv_obj_add_flag(btnRec, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_add_flag(lblRecHint, LV_OBJ_FLAG_HIDDEN);
     }
 
     lv_obj_add_flag(lblDernier, LV_OBJ_FLAG_HIDDEN);
@@ -502,7 +611,7 @@ static void updateStatusScreen(unsigned long nowMs) {
     lv_obj_clear_flag(lblTours, LV_OBJ_FLAG_HIDDEN);
 
     lv_obj_add_flag(lblClock, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(btnRec, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(lblRecHint, LV_OBJ_FLAG_HIDDEN);
   }
 }
 
@@ -721,15 +830,44 @@ static lv_obj_t* lblLapEmpty;
 static lv_obj_t* lblLapHint;
 static std::vector<LapDetail> lapListCache;
 
+// Factorisee -- utilisee a la fois par handleBack() (bouton physique)
+// et par le nouveau bouton tactile de retour (haut droite de l'ecran).
+static void backFromSessionLapsToList() {
+  goToScreen(SCR_SESSION_LIST); // remet selectingMode a false en interne
+  selectingMode = true;         // on veut rester en mode selection sur la liste des sessions
+  screenDirty = true;
+}
+
+static void btnBackLapsClickedCb(lv_event_t* e) {
+  backFromSessionLapsToList();
+}
+
 static void buildSessionLapsScreen() {
   scrSessionLaps = lv_obj_create(NULL);
   lv_obj_set_style_bg_color(scrSessionLaps, lv_color_black(), 0);
   lv_obj_clear_flag(scrSessionLaps, LV_OBJ_FLAG_SCROLLABLE); // le scroll se fait dans le conteneur interne, pas sur l'ecran
   createTitle(scrSessionLaps, "Tours");
 
+  // Bouton tactile de retour -- en plus du BACK physique, pratique avec
+  // des gants ou pour rester une main sur le guidon. Compact, coin haut
+  // droit -- deplace le hint juste en dessous pour ne pas chevaucher.
+  lv_obj_t* btnBack = lv_btn_create(scrSessionLaps);
+  lv_obj_set_size(btnBack, 100, 46);
+  lv_obj_align(btnBack, LV_ALIGN_TOP_RIGHT, -4, 0);
+  lv_obj_set_style_bg_color(btnBack, lv_palette_main(LV_PALETTE_GREY), 0);
+  lv_obj_set_style_bg_color(btnBack, lv_palette_darken(LV_PALETTE_GREY, 2), LV_STATE_PRESSED);
+  lv_obj_set_style_radius(btnBack, 8, 0);
+  lv_obj_add_event_cb(btnBack, btnBackLapsClickedCb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* lblBtnBack = lv_label_create(btnBack);
+  lv_obj_set_style_text_font(lblBtnBack, &lv_font_teko_medium_26, 0);
+  lv_obj_set_style_text_color(lblBtnBack, lv_color_white(), 0);
+  lv_label_set_text(lblBtnBack, "Liste");
+  lv_obj_center(lblBtnBack);
+
   lapListCont = createScrollList(scrSessionLaps, 44);
   lblLapEmpty = createListRow(scrSessionLaps, 44);
   lblLapHint = createHint(scrSessionLaps);
+  lv_obj_align(lblLapHint, LV_ALIGN_TOP_RIGHT, -4, 48); // sous le bouton retour, pas de chevauchement
   lv_label_set_text(lblLapHint, "Glisse: defile  BACK: retour");
 }
 
@@ -775,6 +913,7 @@ static lv_obj_t* lblSettingsHint;
 
 static void settingsRowTappedCb(lv_event_t* e) {
   selectingMode = false;
+  wifiStartRequested = true; // traite dans loop(), pas ici (cf. commentaire pres de la declaration)
   goToScreen(SCR_WIFI); // tap direct = ouvre WiFi en un seul geste
 }
 
@@ -802,22 +941,31 @@ static void refreshSettingsScreen() {
 
 // ===================== Ecran WiFi =====================
 
+static lv_obj_t* lblWifiSsid;
+static lv_obj_t* lblWifiIp;
+
 static void buildWifiScreen() {
   scrWifi = lv_obj_create(NULL);
   lv_obj_set_style_bg_color(scrWifi, lv_color_black(), 0);
-  createTitle(scrWifi, "WiFi (simule)");
+  createTitle(scrWifi, "WiFi actif");
 
-  lv_obj_t* l1 = createListRow(scrWifi, 46);
-  lv_label_set_text(l1, "SSID: ChronoMoto191-SIM");
-  lv_obj_t* l2 = createListRow(scrWifi, 86);
-  lv_label_set_text(l2, "IP:   192.168.4.1");
+  lblWifiSsid = createListRow(scrWifi, 46);
+  lblWifiIp = createListRow(scrWifi, 86);
   lv_obj_t* l3 = createListRowSmall(scrWifi, 130);
-  lv_label_set_text(l3, "(page factice -- pas de vrai serveur");
+  lv_label_set_text(l3, "Connecte-toi au reseau ci-dessus, puis");
   lv_obj_t* l4 = createListRowSmall(scrWifi, 156);
-  lv_label_set_text(l4, " WiFi dans ce sous-projet display_only)");
+  lv_label_set_text(l4, "va sur l'adresse IP depuis un navigateur.");
 
   lv_obj_t* hint = createHint(scrWifi);
   lv_label_set_text(hint, "BACK: statut"); // raccourci -- la version longue debordait sur le titre
+}
+
+static void refreshWifiScreen() {
+  char buf[48];
+  snprintf(buf, sizeof(buf), "SSID: %s", SIM_WIFI_SSID);
+  lv_label_set_text(lblWifiSsid, buf);
+  snprintf(buf, sizeof(buf), "IP:   %s", SIM_WIFI_IP);
+  lv_label_set_text(lblWifiIp, buf);
 }
 
 // ===================== Ecran Nouveau Circuit (capture) =====================
@@ -870,8 +1018,9 @@ static void refreshCurrentScreen(unsigned long nowMs) {
     case SCR_SESSION_LIST: refreshSessionListScreen(); break;
     case SCR_SESSION_LAPS: refreshSessionLapsScreen(); break;
     case SCR_SETTINGS:     refreshSettingsScreen(); break;
-    case SCR_WIFI:         break; // statique, rien a rafraichir
+    case SCR_WIFI:         refreshWifiScreen(); break;
     case SCR_NEW_CIRCUIT:  break; // statique, rien a rafraichir
+    case SCR_CONFIRM_STOP: refreshConfirmStopScreen(); break;
   }
   screenDirty = false;
 }
@@ -879,7 +1028,7 @@ static void refreshCurrentScreen(unsigned long nowMs) {
 // ===================== Gestion PUSH / BACK selon l'ecran courant =====================
 
 // Applique la selection d'un item Circuit (index i) -- factorise pour
-// etre appelee aussi bien par la validation PUSH (2 temps, encodeur)
+// etre appelee aussi bien par la validation PUSH (2 temps)
 // que par un tap direct sur une ligne (1 temps, tactile).
 static void applyCircuitSelection(int i) {
   if (i == 0) {
@@ -899,10 +1048,6 @@ static void applyCircuitSelection(int i) {
 static void openSessionLaps(int i) {
   sessionListSelection = i;
   sessionLapSelection = 0;
-  const SessionSummary* s = selectedSession();
-  int lapCount = s ? s->lapCount : 0;
-  rotaryEncoder.setBoundaries(0, lapCount > 0 ? lapCount - 1 : 0, false);
-  rotaryEncoder.setEncoderValue(0);
   goToScreen(SCR_SESSION_LAPS);
   screenDirty = true;
 }
@@ -910,17 +1055,35 @@ static void openSessionLaps(int i) {
 static void handlePush() {
   switch (currentScreen) {
     case SCR_STATUS:
-      simAdvanceDemoState(); // cycle recherche -> circuit reconnu -> REC -> circuit reconnu (stop)
+      if (recordingEnabled) {
+        // Option 1 (comme sur TFT) : PUSH met en pause pendant
+        // l'enregistrement -- pas BACK. stopRecording() ici agit comme une
+        // pause : le fichier de log est ferme mais le circuit reste arme
+        // (courseManager pas reset), pour permettre une reprise rapide.
+        stopRecording();
+        confirmStopEnteredMs = millis();
+        goToScreen(SCR_CONFIRM_STOP);
+        break;
+      }
+      if (millis() - lastDefinitiveStopMs < STATUS_REC_GRACE_AFTER_STOP_MS) break; // cf. commentaire pres de la constante
+      if (detectionEffectivelyComplete()) {
+        startRecording();
+      }
+      break;
+
+    case SCR_CONFIRM_STOP:
+      // Seule voie de reprise desormais (tactile retire, cf. buildConfirmStopScreen()).
+      if (millis() - confirmStopEnteredMs < CONFIRM_STOP_INPUT_GRACE_MS) break; // cf. commentaire pres de la constante
+      startRecording();
+      goToScreen(SCR_STATUS);
       break;
 
     case SCR_CIRCUIT:
       if (!selectingMode) {
         selectingMode = true;
-        rotaryEncoder.setBoundaries(0, myTracks.courseCount, true);
-        rotaryEncoder.setEncoderValue(circuitSelection);
         screenDirty = true;
       } else {
-        applyCircuitSelection(circuitSelection); // valide la selection encodeur (2e PUSH)
+        applyCircuitSelection(circuitSelection); // valide la selection (2e PUSH) -- cf. tap direct, alternative equivalente
       }
       break;
 
@@ -931,8 +1094,6 @@ static void handlePush() {
       if (!sessionListCache.empty()) {
         if (!selectingMode) {
           selectingMode = true;
-          rotaryEncoder.setBoundaries(0, (int)sessionListCache.size() - 1, false);
-          rotaryEncoder.setEncoderValue(sessionListSelection);
         } else {
           openSessionLaps(sessionListSelection);
         }
@@ -946,9 +1107,9 @@ static void handlePush() {
     case SCR_SETTINGS:
       if (!selectingMode) {
         selectingMode = true;
-        rotaryEncoder.setBoundaries(0, 0, false);
       } else {
         selectingMode = false;
+        wifiStartRequested = true; // traite dans loop(), pas ici
         goToScreen(SCR_WIFI);
       }
       screenDirty = true;
@@ -965,8 +1126,22 @@ static void handlePush() {
 static void handleBack() {
   switch (currentScreen) {
     case SCR_STATUS:
-      cancelNewCircuitCapture(); // no-op ici, laisse pour coherence avec les autres ecrans
+      // Option 1 (comme sur TFT) : BACK ne met plus en pause -- c'est le
+      // role de PUSH desormais (cf. handlePush()). BACK reste le simple
+      // retour au menu Circuit, meme pendant un enregistrement en cours
+      // (comportement identique a TFT/OLED sur ce point).
+      cancelNewCircuitCapture(); // no-op si rien n'est arme
       goToScreen(SCR_CIRCUIT);
+      break;
+
+    case SCR_CONFIRM_STOP:
+      // Arret definitif : desarme le circuit (auto ou force manuellement)
+      // pour qu'aucun faux contact ne puisse relancer l'enregistrement une
+      // fois qu'on a quitte la piste. Le timeout dans loop() couvre le cas
+      // ou on oublie de confirmer avant de prendre la route.
+      activateAutoMode(); // reset complet du courseManager + des flags d'armement
+      lastDefinitiveStopMs = millis(); // cf. STATUS_REC_GRACE_AFTER_STOP_MS -- le geofencing peut rearmer le circuit en ~1s
+      goToScreen(SCR_STATUS);
       break;
 
     case SCR_CIRCUIT:
@@ -984,15 +1159,12 @@ static void handleBack() {
       break;
 
     case SCR_SESSION_LAPS:
-      rotaryEncoder.setBoundaries(0, (int)sessionListCache.size() - 1, false);
-      rotaryEncoder.setEncoderValue(sessionListSelection);
-      goToScreen(SCR_SESSION_LIST); // remet selectingMode a false en interne
-      selectingMode = true;         // on veut rester en mode selection sur la liste des sessions
-      screenDirty = true;
+      backFromSessionLapsToList();
       break;
 
     case SCR_WIFI:
-      goToScreen(SCR_STATUS); // coupe le "WiFi" et revient direct au statut, comme le TFT
+      wifiStopRequested = true; // traite dans loop(), pas ici
+      goToScreen(SCR_STATUS); // coupe le WiFi et revient direct au statut, comme le TFT
       break;
   }
 }
@@ -1001,8 +1173,9 @@ static void handleBack() {
 
 void setup() {
   Serial.begin(115200);
+  randomSeed(esp_random()); // RNG materiel ESP32 -- sequence de tours differente a chaque boot
   delay(1000);
-  Serial.println("=== display_only_191 -- navigation (Circuit/Nouveau circuit/Connexion/Session/Reglages) ===");
+  Serial.println("=== display_only_191 -- banc de test ecran (Circuit/Nouveau circuit/Connexion/Session/Reglages) ===");
 
   I2C_master_Init();
   Serial.println("[1/5] I2C partage ok");
@@ -1011,17 +1184,13 @@ void setup() {
   displayInit();
   Serial.println("[3/5] Ecran + LVGL ok");
 
-  Serial.println("[3.5/5] GPS/SD/batterie simules -- aucune init hardware necessaire ici.");
+  Serial.println("[3.5/5] GPS/SD/batterie/WiFi simules -- aucune init hardware necessaire ici.");
 
   pinMode(BACK_BUTTON, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(BACK_BUTTON), backButtonISR, FALLING);
-  pinMode(ENCODER_CLK, INPUT_PULLUP);
-  pinMode(ENCODER_DT, INPUT_PULLUP);
-  rotaryEncoder.begin();
-  rotaryEncoder.setup(readEncoderISR);
-  rotaryEncoder.setBoundaries(0, 100, false);
-  rotaryEncoder.setAcceleration(0);
-  Serial.println("[4/5] Encodeur + BACK ok");
+  pinMode(PUSH_BUTTON, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(PUSH_BUTTON), pushButtonISR, FALLING);
+  Serial.println("[4/5] PUSH + BACK ok");
 
   if (lvglLock(-1)) {
     lv_obj_t* scrSplash = lv_obj_create(NULL);
@@ -1039,6 +1208,7 @@ void setup() {
     buildSettingsScreen();
     buildWifiScreen();
     buildNewCircuitScreen();
+    buildConfirmStopScreen();
     lvglUnlock();
   }
   Serial.println("[5/5] Ecrans construits, splash affiche");
@@ -1050,40 +1220,75 @@ void setup() {
     lvglUnlock();
   }
 
-  Serial.println("Pret. Statut: PUSH fait tourner recherche->detecte->REC->detecte (stop). BACK va sur Circuit. Anneau: tourne = change d'ecran, PUSH = selection, BACK = retour.");
+  Serial.println("Pret. Circuit: choisis un circuit (ou Auto) pour simuler la detection. Statut: PUSH demarre/pause le REC (si detecte), BACK va sur Circuit. Anneau: swipe = change d'ecran, tap = selection, BACK = retour.");
 }
 
 void loop() {
   unsigned long nowMs = millis();
   simGpsTick();
-  checkLapCompletion(); // simule la fin d'un tour toutes les SIM_LAP_DURATION_MS pendant le REC -- no-op si REC off
+  checkLapCompletion(); // simule la fin d'un tour a une duree aleatoire (8-29s) pendant le REC -- no-op si REC off
 
-  if (rotaryEncoder.isEncoderButtonClicked()) {
-    handlePush();
+  if (lvglLock(10)) {
+    if (pushButtonPressed) {
+      pushButtonPressed = false;
+      handlePush();
+    }
+    if (backButtonPressed) {
+      backButtonPressed = false;
+      handleBack();
+    }
+    // Rotation retiree avec le rotatif physique (27/07) -- l'anneau
+    // (Circuit/Connexion/Session/Reglages) se navigue desormais par swipe
+    // (cf. ringScreenGestureCb()), et la selection dans les listes par tap
+    // direct (cf. commentaires "Tap: choisir" pres de chaque liste). Rien
+    // ne remplace la mise en surbrillance par selection de
+    // SCR_SESSION_LAPS (sessionLapSelection) -- ecran deja scrollable au
+    // tactile (LV_DIR_VER), simple perte de confort, pas de blocage.
+    lvglUnlock();
   }
-  if (backButtonPressed) {
-    backButtonPressed = false;
-    handleBack();
+
+  // WiFi.softAP()/stopDownloadMode() traites ICI, hors de tout verrou
+  // LVGL -- ce sont des operations lentes (radio), jamais appelees
+  // depuis un contexte verrouille (cf. commentaire pres des flags).
+  // Pas de vraie radio WiFi ici (banc) -- juste consommer les flags pour
+  // rester coherent avec settingsRowTappedCb()/handleBack(SCR_WIFI), qui
+  // les positionnent comme au reel.
+  if (wifiStartRequested) {
+    wifiStartRequested = false;
+    Serial.println("WiFi (simule) : demarrage demande.");
   }
-  if (rotaryEncoder.encoderChanged()) {
-    int val = rotaryEncoder.readEncoder();
-    if (!selectingMode && (currentScreen == SCR_CIRCUIT || currentScreen == SCR_CONNEXION ||
-                           currentScreen == SCR_SESSION_LIST || currentScreen == SCR_SETTINGS)) {
-      goToRingScreen(val);
-    } else if (selectingMode && currentScreen == SCR_CIRCUIT) {
-      circuitSelection = val;
-      screenDirty = true;
-    } else if (selectingMode && currentScreen == SCR_SESSION_LIST) {
-      sessionListSelection = val;
-      screenDirty = true;
-    } else if (currentScreen == SCR_SESSION_LAPS) {
-      sessionLapSelection = val;
-      screenDirty = true;
+  if (wifiStopRequested) {
+    wifiStopRequested = false;
+    Serial.println("WiFi (simule) : arret demande.");
+  }
+
+  if (currentScreen == SCR_CONFIRM_STOP) {
+    // BUG CORRIGE (28/07) : nowMs est capture UNE FOIS en haut de loop(),
+    // avant tout traitement de bouton. Si on entre sur SCR_CONFIRM_STOP
+    // dans CETTE MEME iteration (confirmStopEnteredMs = millis() appele
+    // plus tard, dans handlePush()), confirmStopEnteredMs peut alors etre
+    // *posterieur* a nowMs. Comme ce sont des unsigned long, nowMs -
+    // confirmStopEnteredMs ne devient pas negatif mais boucle par en
+    // dessous (~4 milliards), ce qui depasse instantanement
+    // CONFIRM_STOP_TIMEOUT_MS et confirme l'arret en quelques ms au lieu
+    // de 2 minutes -- cause reelle de tous les "ca va trop vite pour etre
+    // vu" observes, quel que soit le bouton implique. Fix : capturer un
+    // millis() frais ici, strictement posterieur ou egal a
+    // confirmStopEnteredMs puisque le temps ne remonte jamais.
+    unsigned long nowCheck = millis();
+    if (nowCheck - confirmStopEnteredMs >= CONFIRM_STOP_TIMEOUT_MS) {
+      // Timeout de securite : personne n'a choisi (BACK ou REPRENDRE) --
+      // on confirme l'arret tout seul plutot que de laisser cet ecran arme
+      // indefiniment (cf. commentaire pres de CONFIRM_STOP_TIMEOUT_MS).
+      activateAutoMode();
+      lastDefinitiveStopMs = nowCheck; // cf. STATUS_REC_GRACE_AFTER_STOP_MS -- le geofencing peut rearmer le circuit en ~1s
+      goToScreen(SCR_STATUS);
     }
   }
 
   static unsigned long lastRender = 0;
-  bool isLiveScreen = (currentScreen == SCR_STATUS || currentScreen == SCR_CONNEXION);
+  bool isLiveScreen = (currentScreen == SCR_STATUS || currentScreen == SCR_CONNEXION ||
+                       currentScreen == SCR_CONFIRM_STOP); // decompte du timeout -- doit se rafraichir seul
   bool timeToRender = isLiveScreen && (nowMs - lastRender >= 250);
   if (timeToRender || screenDirty) {
     lastRender = nowMs;
