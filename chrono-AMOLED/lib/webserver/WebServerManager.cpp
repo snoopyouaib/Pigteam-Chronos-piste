@@ -341,6 +341,23 @@ static String msToLapTime(long ms) {
   return String(buf);
 }
 
+// Inverse de msToLapTime() -- reintroduit volontairement (l'original
+// lapTimeToMs() avait ete retire en meme temps que LapDetail, cf. note
+// ci-dessus), mais cantonne a des variables scalaires (long/float), sans
+// jamais toucher a un conteneur qui grossit (vector/LapDetail). Utilise
+// uniquement pour reperer le meilleur temps de la session en une passe
+// (cf. handleLapTracePage()), donc meme profil memoire que le reste des
+// fonctions de ce fichier deja jugees saines (parsing ligne par ligne,
+// aucune accumulation).
+static long lapTimeToMsSimple(const String& t) {
+  int colon = t.indexOf(':');
+  if (colon < 0) return -1;
+  long minutes = t.substring(0, colon).toInt();
+  float seconds = t.substring(colon + 1).toFloat();
+  if (seconds < 0) return -1;
+  return minutes * 60000L + (long)(seconds * 1000.0f + 0.5f);
+}
+
 // Extrait "AAAAMMJJHHMMSS" depuis "/log_AAAAMMJJ_HHMMSS.csv"
 static String compactKeyFromLogFilename(const String& filename) {
   return stripSeparators(filename.substring(5, filename.length() - 4)); // retire "/log_" et ".csv"
@@ -1052,20 +1069,63 @@ static void handleLapTracePage() {
     return;
   }
 
-  // ----- Page volontairement simplifiee -----
+  // ----- Page volontairement simplifiee, MAIS un peu enrichie -----
   //
   // Deux choses retirees suite a une longue investigation (cf. README) :
   // le graphique JS/SVG de tracé, et l'usage de loadLapsForSession()
   // (construction d'un std::vector<LapDetail>, dont la copie/croissance
   // declenchait de facon reproductible une corruption du tas -- vraie
   // cause identifiee, contrairement au JS accuse a tort au debut).
-  // Remplace par un tableau de TOUS les tours de la session, construit
-  // en lisant /sessions.csv LIGNE PAR LIGNE et en streamant chaque ligne
-  // directement (httpServer.sendContent()) des qu'elle est prete --
-  // jamais de conteneur qui grossit en memoire, jamais de copie de
-  // String en vrac. Le tour demande (lapNumber) est simplement
-  // surligne dans le tableau.
+  // Le tableau reste construit en lisant /sessions.csv LIGNE PAR LIGNE et
+  // en streamant chaque ligne directement (httpServer.sendContent()) des
+  // qu'elle est prete -- jamais de conteneur qui grossit en memoire,
+  // jamais de copie de String en vrac cote firmware.
+  //
+  // Colonnes ajoutees (best/diff/heure) : calculees a partir des seules
+  // donnees deja lues de /sessions.csv (petit fichier, lignes courtes) --
+  // une 1ere passe scalaire (juste un "long bestMs", pas de conteneur)
+  // pour reperer le meilleur temps, puis la 2e passe habituelle pour
+  // streamer le tableau. Meme profil memoire qu'avant.
+  //
+  // Colonnes Distance/V.max/V.min/V.moy : demandent de reparcourir le
+  // log GPS DETAILLE (potentiellement des milliers de lignes) -- pour ne
+  // surtout pas reproduire le pattern LapDetail/gros bloc JS qui a
+  // declenche la corruption, ce calcul est delegue au NAVIGATEUR, via un
+  // petit script qui reutilise l'endpoint /download deja existant et
+  // deja eprouve (c'est celui du bouton "Telecharger"). Rien de nouveau
+  // n'est construit sur le tas de l'ESP32 pour ca -- seul le texte (fixe,
+  // petit) de ce script transite par httpServer.sendContent() comme le
+  // reste de la page.
   String compactKey = compactKeyFromLogFilename("/" + file);
+
+  // ----- Passe 1 : meilleur temps de la session (scalaire uniquement) -----
+  long bestMs = -1;
+  {
+    File fb = LittleFS.open(g_sessionLogPath, "r");
+    if (fb) {
+      bool inTarget = false;
+      while (fb.available()) {
+        String line = fb.readStringUntil('\n');
+        line.trim();
+        if (line.length() == 0 || line.startsWith("date,")) continue;
+        if (line.startsWith("# session demarree")) {
+          String rest = line.substring(line.indexOf("demarree") + 9);
+          inTarget = (stripSeparators(rest) == compactKey);
+          continue;
+        }
+        if (line.startsWith("# session arretee")) { inTarget = false; continue; }
+        if (!inTarget) continue;
+
+        int commaIdx[5], found = 0;
+        for (int i = 0; i < (int)line.length() && found < 5; i++) if (line[i] == ',') commaIdx[found++] = i;
+        if (found == 5) {
+          long ms = lapTimeToMsSimple(line.substring(commaIdx[2] + 1, commaIdx[3]));
+          if (ms >= 0 && (bestMs < 0 || ms < bestMs)) bestMs = ms;
+        }
+      }
+      fb.close();
+    }
+  }
 
   String html = pageHeader("home");
   html += "<h2>Tours de la session</h2>";
@@ -1076,10 +1136,23 @@ static void handleLapTracePage() {
   httpServer.sendContent(html);
   html = "";
 
-  html += "<table style='width:100%;border-collapse:collapse;margin-top:8px;font-size:13px'>";
-  html += "<tr style='opacity:0.7;text-align:left'><th style='padding:4px 8px'>Tour</th><th style='padding:4px 8px'>Temps</th><th style='padding:4px 8px'>Circuit</th></tr>";
+  html += "<div style='overflow-x:auto'>";
+  html += "<table style='width:100%;border-collapse:collapse;margin-top:8px;font-size:13px;white-space:nowrap'>";
+  html += "<tr style='opacity:0.7;text-align:left'>";
+  html += "<th style='padding:4px 8px'>Tour</th><th style='padding:4px 8px'>Temps</th><th style='padding:4px 8px'>Diff</th>";
+  html += "<th style='padding:4px 8px'>Depart tour</th><th style='padding:4px 8px'>Distance</th>";
+  html += "<th style='padding:4px 8px'>V.max</th><th style='padding:4px 8px'>V.min</th><th style='padding:4px 8px'>V.moy</th>";
+  html += "<th style='padding:4px 8px'>Circuit</th></tr>";
   httpServer.sendContent(html);
   html = "";
+
+  // Accumule au fil du streaming la liste (courte, uniquement des
+  // entiers) des numeros de tour valides -- necessaire au script de fin
+  // de page pour savoir quels tours remplir. Une String de quelques
+  // dizaines d'octets meme avec 30-40 tours, sans rapport avec le
+  // pattern qui posait probleme (pas de conteneur d'objets/String
+  // copies, juste une concatenation de chiffres).
+  String lapNumbersJs = "";
 
   File f = LittleFS.open(g_sessionLogPath, "r");
   bool anyLap = false;
@@ -1109,20 +1182,145 @@ static void handleLapTracePage() {
       }
       if (idx >= 6) {
         anyLap = true;
-        bool isCurrent = (fld[2].toInt() == lapNumber);
-        String row = isCurrent ? "<tr style='background:#1d3a5c'>" : "<tr>";
-        row += "<td style='padding:4px 8px'>" + fld[2] + "</td>";
+        String n = fld[2];
+        long ms = lapTimeToMsSimple(fld[3]);
+        bool isBest = (bestMs >= 0 && ms == bestMs);
+        String diffText = "--";
+        if (isBest) diffText = "0.000";
+        else if (ms >= 0 && bestMs >= 0) diffText = "+" + String((ms - bestMs) / 1000.0f, 3);
+
+        String row = isBest ? "<tr style='background:#1d3a5c'>" : "<tr>";
+        row += "<td style='padding:4px 8px'>" + n + "</td>";
         row += "<td style='padding:4px 8px'><b>" + fld[3] + "</b></td>";
+        row += "<td style='padding:4px 8px'>" + diffText + "</td>";
+        row += "<td style='padding:4px 8px' id='start-" + n + "'>...</td>"; // heure de DEPART reelle du tour -- calculee cote navigateur depuis le log detaille (fld[1] de sessions.csv est l'heure de FIN/validation, trompeuse ici)
+        row += "<td style='padding:4px 8px' id='dist-" + n + "'>...</td>";
+        row += "<td style='padding:4px 8px' id='vmax-" + n + "'>...</td>";
+        row += "<td style='padding:4px 8px' id='vmin-" + n + "'>...</td>";
+        row += "<td style='padding:4px 8px' id='vavg-" + n + "'>...</td>";
         row += "<td style='padding:4px 8px'>" + fld[5] + "</td></tr>";
         httpServer.sendContent(row); // une ligne a la fois -- jamais accumulee
+
+        if (lapNumbersJs.length() > 0) lapNumbersJs += ",";
+        lapNumbersJs += n;
       }
     }
     f.close();
   }
 
-  html = "</table>";
+  html = "</table></div>";
   if (!anyLap) html += "<p><i>Aucun tour trouve pour cette session.</i></p>";
   html += "<p style='margin-top:12px'><a class='file' href='/download?file=" + file + "'>&#8681; Telecharger le CSV complet de la session</a></p>";
+  httpServer.sendContent(html);
+  html = "";
+
+  // ----- Distance/V.max/V.min/V.moy : calcul cote navigateur -----
+  //
+  // Reutilise le meme fichier detaille (colonnes local_time,millis_boot,
+  // lat,lng,speed_kmh,fix,sats,laps,circuit,current_lap_ms -- cf.
+  // main.cpp) et le meme decoupage par tour que la page /compare de la
+  // version OLED/TFT (filtre "laps"==tour-1, puis troncature au dernier
+  // point de current_lap_ms minimal pour exclure l'attente au paddock).
+  // Volontairement SANS le graphique SVG associe sur OLED/TFT -- juste
+  // le calcul, pour rester dans un script court.
+  if (anyLap) {
+    html += "<script>";
+    html += "var LAP_LOG_FILE='" + file + "';";
+    html += "var LAP_NUMBERS=[" + lapNumbersJs + "];";
+    html += R"JS(
+(function() {
+  function parseCsv(text) {
+    var lines = text.split(/\r?\n/);
+    var header = null, idx = null;
+    var rows = [];
+    for (var li = 0; li < lines.length; li++) {
+      var line = lines[li].trim();
+      if (!line) continue;
+      var cols = line.split(',');
+      if (!header) {
+        header = cols;
+        idx = { lat: header.indexOf('lat'), lng: header.indexOf('lng'), speed: header.indexOf('speed_kmh'), fix: header.indexOf('fix'), laps: header.indexOf('laps'), lapMs: header.indexOf('current_lap_ms'), localTime: header.indexOf('local_time') };
+        continue;
+      }
+      var lat = parseFloat(cols[idx.lat]), lng = parseFloat(cols[idx.lng]);
+      if (isNaN(lat) || isNaN(lng)) continue;
+      var fix = idx.fix >= 0 ? (parseInt(cols[idx.fix], 10) || 0) : 3;
+      if (fix < 2) continue;
+      rows.push({
+        lat: lat, lng: lng,
+        speed: idx.speed >= 0 ? (parseFloat(cols[idx.speed]) || 0) : 0,
+        laps: idx.laps >= 0 ? (parseInt(cols[idx.laps], 10) || 0) : -1,
+        lapMs: idx.lapMs >= 0 ? (parseInt(cols[idx.lapMs], 10) || 0) : 0,
+        localTime: idx.localTime >= 0 ? cols[idx.localTime] : ''
+      });
+    }
+    return rows;
+  }
+  function haversineM(lat1, lng1, lat2, lng2) {
+    var R = 6371000;
+    var dLat = (lat2 - lat1) * Math.PI / 180, dLng = (lng2 - lng1) * Math.PI / 180;
+    var s = Math.sin(dLat/2)*Math.sin(dLat/2) + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLng/2)*Math.sin(dLng/2);
+    return R * 2 * Math.atan2(Math.sqrt(s), Math.sqrt(1-s));
+  }
+  function extractLap(rows, lapNumber) {
+    var lapRows = rows.filter(function(r) { return r.laps === lapNumber - 1; });
+    if (!lapRows.length) return [];
+    var minMs = lapRows[0].lapMs, startIdx = 0;
+    for (var i = 0; i < lapRows.length; i++) if (lapRows[i].lapMs <= minMs) { minMs = lapRows[i].lapMs; startIdx = i; }
+    return lapRows.slice(startIdx);
+  }
+  function set(id, text) { var el = document.getElementById(id); if (el) el.textContent = text; }
+
+  function markAll(text) {
+    for (var k = 0; k < LAP_NUMBERS.length; k++) {
+      var n = LAP_NUMBERS[k];
+      set('start-'+n, text); set('dist-'+n, text); set('vmax-'+n, text); set('vmin-'+n, text); set('vavg-'+n, text);
+    }
+  }
+
+  // Garde-fou : si /download ne repond jamais (fichier trop volumineux
+  // pour l'AP WiFi, coupure, etc.), on ne veut plus jamais rester bloque
+  // sur "..." indefiniment sans explication -- au bout de 20s, on
+  // affiche explicitement "timeout" pour que ce soit diagnosticable
+  // depuis la page elle-meme, sans avoir besoin d'ouvrir la console.
+  var timedOut = false;
+  var timeoutId = setTimeout(function() { timedOut = true; markAll('timeout'); }, 20000);
+
+  fetch('/download?file=' + encodeURIComponent(LAP_LOG_FILE)).then(function(r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.text();
+  }).then(function(text) {
+    clearTimeout(timeoutId);
+    if (timedOut) return; // reponse arrivee apres coup -- deja marque "timeout", on ne l'ecrase pas a moitie
+    if (text.trim().length === 0) { markAll('log vide'); return; } // fichier detaille present mais 0 octet -- coupure probable pendant l'enregistrement, pas un bug d'affichage
+    var rows = parseCsv(text);
+    if (rows.length === 0) { markAll('log illisible'); return; } // en-tete absent/colonnes lat/lng introuvables -- fichier corrompu ou format inattendu
+    for (var k = 0; k < LAP_NUMBERS.length; k++) {
+      var n = LAP_NUMBERS[k];
+      var lr = extractLap(rows, n);
+      if (!lr.length) { set('start-'+n, '--'); set('dist-'+n, '--'); set('vmax-'+n, '--'); set('vmin-'+n, '--'); set('vavg-'+n, '--'); continue; }
+      var dist = 0, vmax = -Infinity, vmin = Infinity, sum = 0;
+      for (var j = 0; j < lr.length; j++) {
+        vmax = Math.max(vmax, lr[j].speed);
+        vmin = Math.min(vmin, lr[j].speed);
+        sum += lr[j].speed;
+        if (j > 0) dist += haversineM(lr[j-1].lat, lr[j-1].lng, lr[j].lat, lr[j].lng);
+      }
+      set('start-'+n, lr[0].localTime || '--');
+      set('dist-'+n, (dist/1000).toFixed(2) + ' km');
+      set('vmax-'+n, Math.round(vmax) + ' km/h');
+      set('vmin-'+n, Math.round(vmin) + ' km/h');
+      set('vavg-'+n, Math.round(sum/lr.length) + ' km/h');
+    }
+  }).catch(function(err) {
+    clearTimeout(timeoutId);
+    markAll('erreur'); // fetch rejetee (reseau) ou HTTP non-ok (403/404/etc.) -- visible au lieu de rester sur "..."
+  });
+})();
+)JS";
+    html += "</script>";
+  }
+
   html += PAGE_FOOTER;
   httpServer.sendContent(html);
 }
@@ -1210,15 +1408,28 @@ static void handleDebugPage() {
   // qu'un bouton par ligne (qui redemarrait l'ESP a chaque clic) :
   // permet de retirer plusieurs sessions polluantes en un seul
   // redemarrage au lieu d'un par ligne.
+  // Trie du plus recent au plus ancien, comme l'onglet Sessions -- meme
+  // conteneur (vector<SessionSummaryLite>) que celui deja juge sain
+  // (jamais implique dans le bug de tas, cf. note plus haut), on se
+  // contente d'y ajouter un std::sort, pas de nouveau conteneur.
   std::vector<SessionSummaryLite> summaries = loadSessionSummaries();
+  std::sort(summaries.begin(), summaries.end(), [](const SessionSummaryLite& a, const SessionSummaryLite& b) {
+    return a.compactKey > b.compactKey; // "AAAAMMJJHHMMSS" se compare correctement en texte
+  });
   html += "<h3 style='margin-top:20px'>Sessions du carnet (" + String(summaries.size()) + ")</h3>";
   if (summaries.empty()) {
     html += "<p><i>(carnet vide)</i></p>";
   } else {
     html += "<form action='/debug/delete-sessions' method='GET' onsubmit=\"return confirm('Retirer les sessions cochees du carnet ET leurs logs GPS associes ? Irreversible.');\">";
+    String lastDateShown = "";
     for (const SessionSummaryLite& s : summaries) {
+      String dateCompact8 = s.compactKey.length() >= 8 ? s.compactKey.substring(0, 8) : "";
+      if (dateCompact8.length() == 8 && dateCompact8 != lastDateShown) {
+        html += "<h4 style='margin:14px 0 4px;opacity:0.75'>" + prettyDate(dateCompact8) + "</h4>";
+        lastDateShown = dateCompact8;
+      }
       String label = (s.compactKey.length() >= 14)
-        ? (prettyDate(s.compactKey.substring(0, 8)) + " " + prettyTime(s.compactKey.substring(8, 14)))
+        ? prettyTime(s.compactKey.substring(8, 14))
         : s.compactKey;
       bool logFileExists = (s.compactKey.length() >= 14) &&
         g_logsFs->exists("/log_" + s.compactKey.substring(0, 8) + "_" + s.compactKey.substring(8, 14) + ".csv");

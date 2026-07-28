@@ -499,6 +499,7 @@ struct LapDetail {
   int lapNumber;
   unsigned long lapMs;
   String circuit;
+  float maxSpeedKmh; // 0 si absent (anciennes sessions enregistrees avant ce champ)
 };
 
 static std::vector<SessionSummary> loadSessionSummaries() {
@@ -566,12 +567,13 @@ static std::vector<LapDetail> loadLapsForSession(const String& compactKey) {
     }
     if (!inTarget) continue;
 
-    String fld[6];
-    if (splitCsvLine(line, fld, 6) < 6) continue;
+    String fld[7];
+    if (splitCsvLine(line, fld, 7) < 6) continue;
     LapDetail lap;
     lap.lapNumber = fld[2].toInt();
     lap.lapMs = parseLapTimeStr(fld[3]);
     lap.circuit = fld[5];
+    lap.maxSpeedKmh = fld[6].length() > 0 ? fld[6].toFloat() : 0.0f; // absent sur les sessions enregistrees avant ce champ
     result.push_back(lap);
   }
   f.close();
@@ -591,6 +593,7 @@ static bool loggingOk = false;
 static char currentLogPath[40] = "";
 static char currentSessionCompactKey[16] = "";
 static bool recordingEnabled = false;
+static float currentLapMaxSpeedKmh = 0.0f; // remise a 0 a chaque tour termine (checkLapCompletion)
 
 static void appendSessionLine(const String& line) {
   File f = LittleFS.open(SESSION_LOG_PATH, "a");
@@ -618,6 +621,7 @@ static void startRecording() {
   loggingOk = true;
   recordingEnabled = true;
   lastLapCount = 0;
+  currentLapMaxSpeedKmh = 0.0f;
   appendSessionLine(String("# session demarree ") + currentSessionCompactKey);
   Serial.printf("REC ON : %s\n", currentLogPath);
 }
@@ -637,6 +641,7 @@ static void logGpsRow() {
   double lat = liveData.latitude / 1e7;
   double lng = liveData.longitude / 1e7;
   float speedKmh = liveData.speedMmPerS / 1000.0f * 3.6f;
+  if (speedKmh > currentLapMaxSpeedKmh) currentLapMaxSpeedKmh = speedKmh;
 
   unsigned long currentLapMs, bestLapMs; bool hasBest; int lapsCount;
   getDisplayState(currentLapMs, bestLapMs, hasBest, lapsCount);
@@ -663,11 +668,12 @@ static void checkLapCompletion() {
   formatLapTime(getLastFinishedLapMs(), lapBuf, sizeof(lapBuf));
   formatLapTime(hasBest ? bestLapMs : 0, bestBuf, sizeof(bestBuf));
 
-  char line[128];
-  snprintf(line, sizeof(line), "%s,%s,%d,%s,%s,%s",
-           dateBuf, timeBuf, lapsCount, lapBuf, bestBuf, getActiveCourseNameForDisplay());
+  char line[144];
+  snprintf(line, sizeof(line), "%s,%s,%d,%s,%s,%s,%.0f",
+           dateBuf, timeBuf, lapsCount, lapBuf, bestBuf, getActiveCourseNameForDisplay(), currentLapMaxSpeedKmh);
   appendSessionLine(line);
-  Serial.printf("Tour %d enregistre : %s (meilleur : %s)\n", lapsCount, lapBuf, bestBuf);
+  Serial.printf("Tour %d enregistre : %s (meilleur : %s, Vmax %.0f km/h)\n", lapsCount, lapBuf, bestBuf, currentLapMaxSpeedKmh);
+  currentLapMaxSpeedKmh = 0.0f; // repart de zero pour le tour suivant
 }
 
 // ===================== WebServerManager (WiFi/telechargement) =====================
@@ -1153,8 +1159,6 @@ static void updateStatusScreen(unsigned long nowMs) {
 // listes courtes (Circuit ~5 items, Reglages 1 item) qui ont la place.
 // createListRowSmall : medium_26 -- pour les listes qui peuvent avoir
 // jusqu'a 8 lignes (Session/Tours), ou medium_34 deborderait.
-// createHint : deplace a cote du titre (etait en bas d'ecran) -- libere
-// toute la hauteur restante pour les lignes de liste, plus grandes.
 
 static lv_obj_t* createListRow(lv_obj_t* parent, int16_t y) {
   lv_obj_t* lbl = lv_label_create(parent);
@@ -1178,14 +1182,6 @@ static lv_obj_t* createTitle(lv_obj_t* parent, const char* text) {
   lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
   lv_label_set_text(lbl, text);
   lv_obj_align(lbl, LV_ALIGN_TOP_LEFT, 4, 0);
-  return lbl;
-}
-
-static lv_obj_t* createHint(lv_obj_t* parent) {
-  lv_obj_t* lbl = lv_label_create(parent);
-  lv_obj_set_style_text_font(lbl, &lv_font_teko_medium_26, 0);
-  lv_obj_set_style_text_color(lbl, lv_palette_main(LV_PALETTE_GREY), 0);
-  lv_obj_align(lbl, LV_ALIGN_TOP_RIGHT, -4, 4); // a cote du titre (etait en bas d'ecran)
   return lbl;
 }
 
@@ -1235,7 +1231,6 @@ static void applyCircuitSelection(int i);
 static void openSessionLaps(int i);
 
 static lv_obj_t* circuitListCont;
-static lv_obj_t* lblCircuitHint;
 
 static void buildCircuitScreen() {
   scrCircuit = lv_obj_create(NULL);
@@ -1244,7 +1239,6 @@ static void buildCircuitScreen() {
   createTitle(scrCircuit, "Circuit");
 
   circuitListCont = createScrollList(scrCircuit, 44); // pleine hauteur -- plus de bouton en bas, "Nouveau circuit" a son propre ecran dans l'anneau
-  lblCircuitHint = createHint(scrCircuit);
 }
 
 static void circuitRowTappedCb(lv_event_t* e) {
@@ -1266,7 +1260,6 @@ static void refreshCircuitScreen() {
     lv_label_set_text(row, buf);
     lv_obj_add_event_cb(row, circuitRowTappedCb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
   }
-  lv_label_set_text(lblCircuitHint, selectingMode ? "PUSH: valider  BACK: annuler  (ou tap direct)" : "Tap: choisir   BACK: statut");
 }
 
 // ===================== Ecran Connexion =====================
@@ -1282,8 +1275,6 @@ static void buildConnexionScreen() {
 
   lblConnGps = createListRow(scrConnexion, 44);
   lblConnCircuit = createListRow(scrConnexion, 84);
-  lv_obj_t* hint = createHint(scrConnexion);
-  lv_label_set_text(hint, "BACK: statut");
 }
 
 static void refreshConnexionScreen() {
@@ -1297,7 +1288,6 @@ static void refreshConnexionScreen() {
 
 static lv_obj_t* sessionListCont;
 static lv_obj_t* lblSessionEmpty;
-static lv_obj_t* lblSessionHint;
 static std::vector<SessionSummary> sessionListCache;
 
 static void buildSessionListScreen() {
@@ -1308,7 +1298,6 @@ static void buildSessionListScreen() {
 
   sessionListCont = createScrollList(scrSessionList, 44);
   lblSessionEmpty = createListRow(scrSessionList, 44);
-  lblSessionHint = createHint(scrSessionList);
 }
 
 static void sessionRowTappedCb(lv_event_t* e) {
@@ -1344,8 +1333,6 @@ static void refreshSessionListScreen() {
       lv_obj_add_event_cb(row, sessionRowTappedCb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
     }
   }
-
-  lv_label_set_text(lblSessionHint, selectingMode ? "PUSH: voir tours  BACK: annuler" : "Tap: voir les tours  BACK: statut");
 }
 
 // Session actuellement selectionnee (meme ordre affiche -- plus recente en premier)
@@ -1359,7 +1346,6 @@ static const SessionSummary* selectedSession() {
 
 static lv_obj_t* lapListCont;
 static lv_obj_t* lblLapEmpty;
-static lv_obj_t* lblLapHint;
 static std::vector<LapDetail> lapListCache;
 
 // Factorisee -- utilisee a la fois par handleBack() (bouton physique)
@@ -1398,9 +1384,6 @@ static void buildSessionLapsScreen() {
 
   lapListCont = createScrollList(scrSessionLaps, 44);
   lblLapEmpty = createListRow(scrSessionLaps, 44);
-  lblLapHint = createHint(scrSessionLaps);
-  lv_obj_align(lblLapHint, LV_ALIGN_TOP_RIGHT, -4, 48); // sous le bouton retour, pas de chevauchement
-  lv_label_set_text(lblLapHint, "Glisse: defile  BACK: retour");
 }
 
 static void refreshSessionLapsScreen() {
@@ -1431,8 +1414,11 @@ static void refreshSessionLapsScreen() {
                                         : lv_color_white(), 0);
     char lapBuf[16];
     formatLapTime(lap.lapMs, lapBuf, sizeof(lapBuf));
-    char buf[48];
-    snprintf(buf, sizeof(buf), "%sTour %d : %s%s", sel ? "> " : "  ", lap.lapNumber, lapBuf, isBest ? "  (best)" : "");
+    char vmaxBuf[16];
+    if (lap.maxSpeedKmh > 0) snprintf(vmaxBuf, sizeof(vmaxBuf), "  Vmax %.0f", lap.maxSpeedKmh);
+    else vmaxBuf[0] = '\0'; // anciennes sessions sans vitesse max enregistree
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%sTour %d : %s%s%s", sel ? "> " : "  ", lap.lapNumber, lapBuf, isBest ? "  (best)" : "", vmaxBuf);
     lv_label_set_text(row, buf);
   }
 }
@@ -1441,7 +1427,6 @@ static void refreshSessionLapsScreen() {
 // ===================== Ecran Reglages =====================
 
 static lv_obj_t* lblSettingsRow;
-static lv_obj_t* lblSettingsHint;
 
 static void settingsRowTappedCb(lv_event_t* e) {
   selectingMode = false;
@@ -1461,14 +1446,12 @@ static void buildSettingsScreen() {
   lv_obj_set_style_bg_color(lblSettingsRow, lv_palette_main(LV_PALETTE_YELLOW), LV_STATE_PRESSED);
   lv_obj_set_style_text_color(lblSettingsRow, lv_color_black(), LV_STATE_PRESSED);
   lv_obj_add_event_cb(lblSettingsRow, settingsRowTappedCb, LV_EVENT_CLICKED, NULL);
-  lblSettingsHint = createHint(scrSettings);
 }
 
 static void refreshSettingsScreen() {
   bool sel = selectingMode;
   lv_obj_set_style_text_color(lblSettingsRow, sel ? lv_palette_main(LV_PALETTE_YELLOW) : lv_color_white(), 0);
   lv_label_set_text(lblSettingsRow, sel ? "> WiFi telechargement" : "  WiFi telechargement");
-  lv_label_set_text(lblSettingsHint, sel ? "PUSH: ouvrir   BACK: annuler" : "Tap: ouvrir   BACK: statut");
 }
 
 // ===================== Ecran WiFi =====================
@@ -1487,9 +1470,6 @@ static void buildWifiScreen() {
   lv_label_set_text(l3, "Connecte-toi au reseau ci-dessus, puis");
   lv_obj_t* l4 = createListRowSmall(scrWifi, 156);
   lv_label_set_text(l4, "va sur l'adresse IP depuis un navigateur.");
-
-  lv_obj_t* hint = createHint(scrWifi);
-  lv_label_set_text(hint, "BACK: statut"); // raccourci -- la version longue debordait sur le titre
 }
 
 static void refreshWifiScreen() {
@@ -1535,9 +1515,6 @@ static void buildNewCircuitScreen() {
   lv_obj_set_style_text_color(lblStart, lv_color_white(), 0);
   lv_label_set_text(lblStart, "Demarrer la capture");
   lv_obj_center(lblStart);
-
-  lv_obj_t* hint = createHint(scrNewCircuit);
-  lv_label_set_text(hint, "BACK: statut");
 }
 
 // ===================== Refresh dispatcher =====================
