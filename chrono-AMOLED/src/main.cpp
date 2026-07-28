@@ -953,6 +953,13 @@ static unsigned long lastDefinitiveStopMs = 0;
 static const unsigned long STATUS_REC_GRACE_AFTER_STOP_MS = 1500UL;
 static bool selectingMode = false; // true = mode "selection dans la liste" (Circuit/Session/Reglages), arme par PUSH
 
+// Batterie trop faible pour demarrer un enregistrement -- evite de
+// couper l'alimentation en plein tour (perte de log en cours) et
+// d'user une batterie deja quasi vide. Affichage "NO BAT" a la place de
+// "PRESS REC", PUSH ignore sur l'ecran Statut tant que c'est sous ce
+// seuil (mais n'arrete pas un REC deja en cours -- cf. handlePush()).
+static const int LOW_BATT_NO_REC_PERCENT = 5;
+
 static int ringIndex = 0;        // 0=Circuit,1=NouveauCircuit,2=Connexion,3=Session,4=Reglages
 static int circuitSelection = 0; // 0=Auto, 1..N=courses (plus de "Nouveau circuit" ici, ecran dedie desormais)
 static int sessionListSelection = 0;
@@ -1198,6 +1205,11 @@ static void updateStatusScreen(unsigned long nowMs) {
     if (circuitDetected) {
       lv_obj_align(lblRecHint, LV_ALIGN_BOTTOM_RIGHT, -4, -4);
       lv_obj_clear_flag(lblRecHint, LV_OBJ_FLAG_HIDDEN);
+      if (battPercent <= LOW_BATT_NO_REC_PERCENT) {
+        lv_label_set_text(lblRecHint, "NO BAT");
+      } else {
+        lv_label_set_text(lblRecHint, "PRESS REC");
+      }
     } else {
       lv_obj_add_flag(lblRecHint, LV_OBJ_FLAG_HIDDEN);
     }
@@ -1683,6 +1695,7 @@ static void handlePush() {
         break;
       }
       if (millis() - lastDefinitiveStopMs < STATUS_REC_GRACE_AFTER_STOP_MS) break; // cf. commentaire pres de la constante
+      if (readBatteryPercent() <= LOW_BATT_NO_REC_PERCENT) break; // "NO BAT" affiche a la place -- pas de nouvel enregistrement sous ce seuil
       if (detectionEffectivelyComplete()) {
         startRecording();
       }
