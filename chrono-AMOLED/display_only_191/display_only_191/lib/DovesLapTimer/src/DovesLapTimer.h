@@ -1,0 +1,756 @@
+/**
+ * GPS-based lap timing library for go-kart and racing applications.
+ * This library does NOT interface with your GPS, simply feed it data and check the state.
+ * Supports start/finish line detection, 3-sector split timing, pace comparison, and distance tracking.
+ *
+ * The development of this library has been overseen, and all documentation has been generated using chatGPT4.
+ */
+
+#ifndef _DOVES_LAP_TIMER_H
+#define _DOVES_LAP_TIMER_H
+
+#include "ArxTypeTraits.h"
+#include "GeoMath.h"
+using TRITYPE = double;
+
+// On classic AVR (Mega, Uno) `double` is a 32-bit float (~7 significant
+// digits). At real-world latitudes/longitudes that quantizes position to
+// roughly 0.2-0.75 m and pushes per-fix haversine half-angle differences
+// below float precision: lap *counting* still works (the 7 m crossing
+// threshold absorbs it) but odometer increments and crossing interpolation
+// carry large relative error. The full advertised precision requires a
+// target with true 64-bit double (nRF52840, ESP32, SAMD51, RP2040, ...).
+// See README "Hardware" notes.
+#if defined(__SIZEOF_DOUBLE__) && (__SIZEOF_DOUBLE__ < 8)
+#warning "DovesLapTimer: 'double' is only 32 bits on this target (classic AVR). Lap counting works but GPS math runs degraded - distances and interpolated crossing times will be noticeably less accurate. Use a 64-bit-double MCU (e.g. XIAO nRF52840) for full precision."
+#endif
+
+#define CROSSING_LINE_SIDE_A -1
+#define CROSSING_LINE_SIDE_EXACT 0
+#define CROSSING_LINE_SIDE_B 1
+
+// Course detection constants
+#define COURSE_DETECT_SPEED_THRESHOLD_MPH  20
+#define COURSE_DETECT_WAYPOINT_PROXIMITY_METERS 10.0
+#define COURSE_DETECT_MIN_DISTANCE_METERS  200.0
+#define COURSE_DETECT_DISTANCE_TOLERANCE_PCT  0.25
+#define COURSE_DETECT_MAX_REJECTIONS  3
+// Completed proximity passes (full laps back at the waypoint) that matched
+// no configured course length before CourseManager falls back to Lap
+// Anything. Without this, a wrong/missing course config left detection in
+// WAYPOINT_SET forever while the WaypointLapTimer's laps were never surfaced.
+#define COURSE_DETECT_MAX_NO_MATCH_PASSES  3
+// Distance failsafe: if detection is still incomplete after driving
+// factor x (longest configured course length), or the floor below for very
+// short courses, fall back to Lap Anything. Catches the "never returns to
+// within 10m of the waypoint" hang that pass counting can't see.
+#define COURSE_DETECT_FALLBACK_DISTANCE_FACTOR  4.0
+#define COURSE_DETECT_FALLBACK_MIN_METERS  2000.0
+#define METERS_TO_FEET  GEOMATH_METERS_TO_FEET
+
+// Waypoint lap timer constants
+#define WAYPOINT_LAP_MIN_DISTANCE_METERS  100.0
+#define WAYPOINT_LAP_PROXIMITY_METERS  30.0
+
+// Direction detection
+#define DIR_UNKNOWN  0
+#define DIR_FORWARD  1
+#define DIR_REVERSE  2
+
+// Course detection states
+#define DETECT_STATE_IDLE  0
+#define DETECT_STATE_WAITING_FOR_SPEED  1
+#define DETECT_STATE_WAYPOINT_SET  2
+#define DETECT_STATE_CANDIDATES_READY  3
+#define DETECT_STATE_DETECTED  4
+
+// Maximum courses supported
+#define MAX_COURSES  8
+
+// GPS time base: milliseconds since UTC midnight, wraps 86,399,999 -> 0
+#define DOVES_MILLIS_PER_DAY  86400000UL
+
+// GPS input validation: a single-fix jump beyond this is treated as a glitch
+// and dropped; after GPS_JUMP_REACCEPT_COUNT consecutive far fixes the new
+// position is accepted as real (signal re-acquisition) and the position is
+// re-seeded without crediting the gap to the odometer.
+#define GPS_MAX_PLAUSIBLE_JUMP_METERS  500.0
+#define GPS_JUMP_REACCEPT_COUNT  3
+
+// Max believable gap between the two consecutive buffered fixes that straddle
+// a crossing line. A larger gap means the GPS time base stepped (e.g. u-blox
+// re-acquisition) and the pair cannot be interpolated coherently.
+#define CROSSING_MAX_FIX_GAP_MS  10000UL
+
+// The straddling pair's summed distance to the line is validated against
+// max(crossingThresholdMeters, factor * pair spacing) so that low-rate GPS
+// (widely spaced fixes) doesn't fail validation purely on sample density.
+#define CROSSING_PAIR_SPACING_FACTOR  1.25
+
+/**
+ * @brief Elapsed milliseconds between two milliseconds-since-midnight timestamps.
+ *
+ * Normalizes across the UTC midnight wrap (86,399,999 -> 0), which happens
+ * mid-evening across the Americas. Without this, a lap straddling midnight
+ * underflows unsigned subtraction into a ~4.29-billion-ms "lap time".
+ *
+ * @param startMs Earlier timestamp, in ms since midnight.
+ * @param endMs Later timestamp, in ms since midnight.
+ * @return Elapsed time in ms, wrap-normalized.
+ */
+static inline unsigned long timeSinceMidnightDelta(unsigned long startMs, unsigned long endMs) {
+  if (endMs < startMs) {
+    endMs += DOVES_MILLIS_PER_DAY;
+  }
+  return endMs - startMs;
+}
+
+// Outcome of a single _detectLineCrossing pass.
+enum LineDetectResult {
+  LINE_DETECT_NONE,         // not in / near the zone, or exited with an invalid interpolation
+  LINE_DETECT_IN_ZONE,      // inside the zone (entered this fix or continuing)
+  LINE_DETECT_COMPLETED,    // exited the zone this fix — interpolated outputs valid
+};
+
+
+struct crossingPointBufferEntry {
+  double lat; // latitude
+  double lng; // longitude
+  unsigned long time; // current time in milliseconds
+  float odometer; // time traveled since device start and this entry
+  float speedKmh; // speed in kmph
+};
+
+struct DirectionDetector {
+  int direction;    // DIR_UNKNOWN, DIR_FORWARD, DIR_REVERSE
+  bool raceSeen;
+  // Per-lap window: timestamps of physical S2/S3 crossings since the last
+  // start/finish. Direction is decided only when BOTH are present, by their
+  // temporal order — independent of the lap calculation's sector output.
+  unsigned long lapS2CrossingTime;
+  unsigned long lapS3CrossingTime;
+
+  DirectionDetector()
+    : direction(DIR_UNKNOWN), raceSeen(false),
+      lapS2CrossingTime(0), lapS3CrossingTime(0) {}
+  void reset() {
+    direction = DIR_UNKNOWN;
+    raceSeen = false;
+    lapS2CrossingTime = 0;
+    lapS3CrossingTime = 0;
+  }
+  void onLineCrossing(int sectorNumber, unsigned long crossingTime);
+  bool isReverse() const { return direction == DIR_REVERSE; }
+  bool isResolved() const { return direction != DIR_UNKNOWN; }
+};
+
+class DovesLapTimer {
+public:
+  DovesLapTimer(double crossingThresholdMeters = 7, Stream *debugSerial = NULL);
+
+  /**
+   * @brief Updates a few internal stats and then checks the status of crossing a line
+   *
+   * This should be run every time the GPS is fixed and gets a new location is aquired!
+   * All of the magic happens here!!!!!!
+   *
+   * @param currentLat Latitude of the current position in decimal degrees.
+   * @param currentLng Longitude of the current position in decimal degrees.
+   * @param currentAltitudeMeters Altitude of the current position in meters.
+   * @param currentSpeedKnots The current speed in knots
+   */
+  int loop(double currentLat, double currentLng, float currentAltitudeMeters, float currentSpeedKnots);
+
+  /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+  /**
+   * @brief Checks if the triangle formed by the given coordinates is an obtuse triangle.
+   * 
+   * @param lat1 Latitude of the first point
+   * @param lon1 Longitude of the first point
+   * @param lat2 Latitude of the second point
+   * @param lon2 Longitude of the second point
+   * @param lat3 Latitude of the third point
+   * @param lon3 Longitude of the third point
+   * @return true if the triangle is an obtuse triangle, false otherwise
+   */
+  bool isObtuseTriangle(double lat1, double lon1, double lat2, double lon2, double lat3, double lon3);
+
+  /**
+   * @brief Check if a driver is within a threshold distance of the line formed by the two crossing points.
+   *
+   * This function checks whether the driver is within a threshold distance from the line formed by
+   * crossing points A and B. The threshold is defined by crossingThresholdMeters.
+   * 
+   * @param driverLat Latitude of the driver's position.
+   * @param driverLon Longitude of the driver's position.
+   * @param crossingPointALat Latitude of crossing point A.
+   * @param crossingPointALon Longitude of crossing point A.
+   * @param crossingPointBLat Latitude of crossing point B.
+   * @param crossingPointBLon Longitude of crossing point B.
+   * @return True if the driver is within the threshold distance, otherwise False.
+   */
+  bool insideLineThreshold(double driverLat, double driverLon, double crossingPointALat, double crossingPointALon, double crossingPointBLat, double crossingPointBLon);
+
+  /**
+   * @brief Determines which side of a line a driver is on.
+   *
+   * Given a point's position and two points defining a line segment, this function computes
+   * the side of the line the point is on. The line is treated as infinite for the side determination.
+   * 
+   * @param driverLat The latitude of the point's position.
+   * @param driverLng The longitude of the point's position.
+   * @param pointALat The latitude of the first point of the line.
+   * @param pointALng The longitude of the first point of the line.
+   * @param pointBLat The latitude of the second point of the line.
+   * @param pointBLng The longitude of the second point of the line.
+   * @return Returns 1 if the point is on one side of the line, -1 if the point is on the other side, and 0 if the point is exactly on the line.
+   */
+  int pointOnSideOfLine(double driverLat, double driverLng, double pointALat, double pointALng, double pointBLat, double pointBLng);
+  /**
+   * @brief Calculate the shortest distance between a point and a line segment.
+   *
+   * This function takes the coordinates of a point (pointX, pointY) and a line segment
+   * defined by two endpoints (startX, startY) and (endX, endY), and returns the shortest
+   * distance between the point and the line segment. Inputs are decimal-degree
+   * coordinates; the projection onto the segment happens in degree space, but
+   * every return path measures the final distance via haversine, so the
+   * result is in **meters**.
+   *
+   * @param pointX The x-coordinate of the point.
+   * @param pointY The y-coordinate of the point.
+   * @param startX The x-coordinate of the first endpoint of the line segment.
+   * @param startY The y-coordinate of the first endpoint of the line segment.
+   * @param endX The x-coordinate of the second endpoint of the line segment.
+   * @param endY The y-coordinate of the second endpoint of the line segment.
+   * @return The shortest distance between the point and the line segment, in meters.
+   */
+  double pointLineSegmentDistance(double pointX, double pointY, double startX, double startY, double endX, double endY);
+  /**
+   * @brief Calculates the great-circle distance between two points on the Earth's surface using the Haversine formula.
+   *
+   * This function takes the latitude and longitude of two points in decimal degrees and returns the distance between
+   * them in meters. The Haversine formula is used to account for the Earth's curvature, providing accurate results
+   * for relatively short distances (up to a few thousand kilometers).
+   *
+   * Note: This function assumes that the Earth is a perfect sphere with a radius of 6,371 kilometers.
+   *
+   * @param lat1 Latitude of the first point in decimal degrees
+   * @param lon1 Longitude of the first point in decimal degrees
+   * @param lat2 Latitude of the second point in decimal degrees
+   * @param lon2 Longitude of the second point in decimal degrees
+   * @return double The great-circle distance between the two points in meters
+   */
+  double haversine(double lat1, double lon1, double lat2, double lon2);
+  /**
+   * @brief Calculates the distance between two GPS points, including altitude difference.
+   *
+   * This function computes the distance between two GPS points using the haversine formula,
+   * and takes into account the altitude difference between the points. The resulting distance
+   * is the true 3D distance between the points, rather than just the 2D distance on the Earth's surface.
+   *
+   * @param prevLat Latitude of the first GPS point in decimal degrees.
+   * @param prevLng Longitude of the first GPS point in decimal degrees.
+   * @param prevAlt Altitude of the first GPS point in meters.
+   * @param currentLat Latitude of the second GPS point in decimal degrees.
+   * @param currentLng Longitude of the second GPS point in decimal degrees.
+   * @param currentAlt Altitude of the second GPS point in meters.
+   * @return The 3D distance between the two GPS points in meters.
+   */
+  double haversine3D(double prevLat, double prevLng, double prevAlt, double currentLat, double currentLng, double currentAlt);
+
+  /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+  /**
+   * @brief Reset all parameters back to 0
+   */
+  void reset();
+  /**
+   * @brief Sets the start/finish line using two points (A and B).
+   *
+   * @param pointALat Latitude of point A in decimal degrees.
+   * @param pointALng Longitude of point A in decimal degrees.
+   * @param pointBLat Latitude of point B in decimal degrees.
+   * @param pointBLng Longitude of point B in decimal degrees.
+   */
+  void setStartFinishLine(double pointALat, double pointALng, double pointBLat, double pointBLng);
+  /**
+   * @brief Sets the sector 2 line using two points (A and B).
+   *
+   * @param pointALat Latitude of point A in decimal degrees.
+   * @param pointALng Longitude of point A in decimal degrees.
+   * @param pointBLat Latitude of point B in decimal degrees.
+   * @param pointBLng Longitude of point B in decimal degrees.
+   */
+  void setSector2Line(double pointALat, double pointALng, double pointBLat, double pointBLng);
+  /**
+   * @brief Sets the sector 3 line using two points (A and B).
+   *
+   * @param pointALat Latitude of point A in decimal degrees.
+   * @param pointALng Longitude of point A in decimal degrees.
+   * @param pointBLat Latitude of point B in decimal degrees.
+   * @param pointBLng Longitude of point B in decimal degrees.
+   */
+  void setSector3Line(double pointALat, double pointALng, double pointBLat, double pointBLng);
+  /**
+   * @brief Updates the current GPS time since midnight.
+   *
+   * @param currentTimeMilliseconds The current time in milliseconds.
+   */
+  void updateCurrentTime(unsigned long currentTimeMilliseconds);
+  /**
+   * @brief forces linear interpolation when checking crossing line
+   *
+   * Might maybe be more accurate if your track(s) finishline is on a straight or other location you expect constant speed
+   */
+  void forceLinearInterpolation();
+  /**
+   * @brief Forces Catmull-Rom spline interpolation when checking crossing line.
+   *
+   * Catmull-Rom interpolation uses 4 control points to create a smooth curve,
+   * which can provide more accurate crossing time calculation when the vehicle
+   * path curves near the line. Falls back to linear interpolation automatically
+   * if insufficient control points are available (crossing detected too early
+   * in the buffer).
+   */
+  void forceCatmullRomInterpolation();
+  /**
+   * @brief Gets the race started status (passed the line one time).
+   *
+   * @return True if the race has started, false otherwise.
+   */
+  bool getRaceStarted() const;
+  /**
+   * @brief Gets the crossing status.
+   *
+   * @return True if crossing the start/finish line, false otherwise.
+   */
+  bool getCrossing() const;
+  /**
+   * @brief Gets the current lap start time.
+   *
+   * @return The current lap start time in milliseconds.
+   */
+  unsigned long getCurrentLapStartTime() const;
+  /**
+   * @brief Gets the current lap time.
+   *
+   * @return The current lap time in milliseconds.
+   */
+  unsigned long getCurrentLapTime() const;
+  /**
+   * @brief Gets the last lap time.
+   *
+   * @return The last lap time in milliseconds.
+   */
+  unsigned long getLastLapTime() const;
+  /**
+   * @brief Gets the best lap time.
+   *
+   * @return The best lap time in milliseconds.
+   */
+  unsigned long getBestLapTime() const;
+  /**
+   * @brief Gets the current lap odometer start.
+   *
+   * @return The distance traveled at the start of the current lap in meters.
+   */
+  float getCurrentLapOdometerStart() const;
+  /**
+   * @brief Gets the current lap distance.
+   *
+   * @return The distance traveled during the current lap in meters.
+   */
+  float getCurrentLapDistance() const;
+  /**
+   * @brief Gets the last lap distance.
+   *
+   * @return The distance traveled during the last lap in meters.
+   */
+  float getLastLapDistance() const;
+  /**
+   * @brief Gets the best lap distance.
+   *
+   * @return The distance traveled during the best lap in meters.
+   */
+  float getBestLapDistance() const;
+  /**
+   * @brief Gets the total distance traveled.
+   *
+   * @return The total distance traveled in meters.
+   */
+  float getTotalDistanceTraveled() const;
+  /**
+   * @brief Gets the best lap number.
+   *
+   * @return The lap number of the best lap.
+   */
+  int getBestLapNumber() const;
+  /**
+   * @brief Gets the total number of laps completed.
+   *
+   * @return The total number of laps completed.
+   */
+  int getLaps() const;
+  /**
+   * @brief Calculates the pace difference between the current lap and the best lap.
+   *
+   * Pace is time over distance, so the returned delta is in **milliseconds
+   * per meter** (current lap pace minus best lap pace) — multiply by the
+   * remaining lap distance for a projected time gap. A positive value means
+   * the current lap is running slower than the best lap's pace, negative
+   * means faster. Returns 0 until both laps have distance recorded.
+   *
+   * @return Pace delta in milliseconds per meter.
+   */
+  float getPaceDifference() const;
+  /**
+   * @brief Gets the current speed in kilometers per hour.
+   *
+   * @return The current speed in km/h.
+   */
+  float getCurrentSpeedKmh() const;
+  /**
+   * @brief Gets the current speed in miles per hour.
+   *
+   * @return The current speed in mph.
+   */
+  float getCurrentSpeedMph() const;
+
+
+  /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+  // Sector timing methods
+
+  /**
+   * @brief Gets the best sector 1 time.
+   *
+   * @return The best sector 1 time in milliseconds, or 0 if no valid sector 1 time recorded.
+   */
+  unsigned long getBestSector1Time() const;
+  /**
+   * @brief Gets the best sector 2 time.
+   *
+   * @return The best sector 2 time in milliseconds, or 0 if no valid sector 2 time recorded.
+   */
+  unsigned long getBestSector2Time() const;
+  /**
+   * @brief Gets the best sector 3 time.
+   *
+   * @return The best sector 3 time in milliseconds, or 0 if no valid sector 3 time recorded.
+   */
+  unsigned long getBestSector3Time() const;
+  /**
+   * @brief Gets the current lap sector 1 time.
+   *
+   * @return The current lap sector 1 time in milliseconds, or 0 if sector 1 not yet completed.
+   */
+  unsigned long getCurrentLapSector1Time() const;
+  /**
+   * @brief Gets the current lap sector 2 time.
+   *
+   * @return The current lap sector 2 time in milliseconds, or 0 if sector 2 not yet completed.
+   */
+  unsigned long getCurrentLapSector2Time() const;
+  /**
+   * @brief Gets the current lap sector 3 time.
+   *
+   * @return The current lap sector 3 time in milliseconds, or 0 if sector 3 not yet completed.
+   */
+  unsigned long getCurrentLapSector3Time() const;
+  /**
+   * @brief Gets the optimal lap time calculated from best sector times.
+   *
+   * @return The sum of best sector 1, 2, and 3 times in milliseconds, or 0 if sectors not configured.
+   */
+  unsigned long getOptimalLapTime() const;
+  /**
+   * @brief Gets the lap number that achieved the best sector 1 time.
+   *
+   * @return The lap number, or 0 if no valid sector 1 time recorded.
+   */
+  int getBestSector1LapNumber() const;
+  /**
+   * @brief Gets the lap number that achieved the best sector 2 time.
+   *
+   * @return The lap number, or 0 if no valid sector 2 time recorded.
+   */
+  int getBestSector2LapNumber() const;
+  /**
+   * @brief Gets the lap number that achieved the best sector 3 time.
+   *
+   * @return The lap number, or 0 if no valid sector 3 time recorded.
+   */
+  int getBestSector3LapNumber() const;
+  /**
+   * @brief Gets the current sector the driver is in.
+   *
+   * @return 0 if race not started, 1/2/3 for current sector.
+   */
+  int getCurrentSector() const;
+  /**
+   * @brief Checks if sector lines are configured.
+   *
+   * @return True if both sector 2 and sector 3 lines are configured, false otherwise.
+   */
+  bool areSectorLinesConfigured() const;
+  /**
+   * @brief Number of crossing-zone exits whose interpolation was rejected.
+   *
+   * A rejection means the GPS data inside the zone never produced a usable
+   * straddling pair (no side change, pair too far from the line, incoherent
+   * timestamps, or crossing landing off the line segment). A steadily
+   * climbing count with a non-incrementing lap counter is the signature of
+   * a misplaced line or an unsuitable GPS setup — previously this failure
+   * was visible only on debug serial.
+   *
+   * @return Count of rejected crossings since construction or reset().
+   */
+  unsigned int getRejectedCrossingCount() const;
+  /**
+   * @brief Checks if the start/finish line is configured.
+   *
+   * Until setStartFinishLine() has been called with a valid (non-degenerate,
+   * finite) line, loop() performs no start/finish crossing detection.
+   *
+   * @return True if a valid start/finish line has been set, false otherwise.
+   */
+  bool isStartFinishLineConfigured() const;
+
+  /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+  // Direction detection methods
+
+  /**
+   * @brief Gets the detected driving direction.
+   *
+   * @return DIR_UNKNOWN (0), DIR_FORWARD (1), or DIR_REVERSE (2).
+   */
+  int getDirection() const;
+  /**
+   * @brief Checks if the driving direction has been resolved.
+   *
+   * @return True if direction is known (forward or reverse), false if still unknown.
+   */
+  bool isDirectionResolved() const;
+
+private:
+  template<typename... Args>
+  void debug_print(Args&&... args) {
+    if(_serial) {
+      _serial->print(std::forward<Args>(args)...);
+    }
+  }
+  template<typename... Args>
+  void debug_println(Args&&... args) {
+    if(_serial) {
+      _serial->println(std::forward<Args>(args)...);
+    }
+  }
+
+  /**
+   * @brief Checks if the kart is crossing the start/finish line and calculates lap time and crossing point.
+   *
+   * This function is responsible for detecting when the kart is crossing the start/finish line. It compares
+   * the current position to the start/finish line and, if it is within a specified threshold distance,
+   * starts saving GPS data to a buffer. When the kart moves away from the line, the function calls
+   * interpolateCrossingPoint() to calculate the precise point at which the kart crossed the line,
+   * and computes the lap time.
+   *
+   * @param currentLat Latitude of the current position in decimal degrees.
+   * @param currentLng Longitude of the current position in decimal degrees.
+   * @param currentTimeMilliseconds The current time in milliseconds.
+   */
+  bool checkStartFinish(double currentLat, double currentLng);
+  /**
+   * @brief Checks if the kart is crossing a sector line and handles sector timing.
+   *
+   * @param currentLat Latitude of the current position in decimal degrees.
+   * @param currentLng Longitude of the current position in decimal degrees.
+   * @param pointALat Latitude of sector line point A.
+   * @param pointALng Longitude of sector line point A.
+   * @param pointBLat Latitude of sector line point B.
+   * @param pointBLng Longitude of sector line point B.
+   * @param crossingFlag Reference to the crossing state flag for this line.
+   * @param sectorNumber The sector number (2 or 3) being checked.
+   * @return True if near or crossing the line, false otherwise.
+   */
+  bool checkSectorLine(double currentLat, double currentLng, double pointALat, double pointALng, double pointBLat, double pointBLng, bool& crossingFlag, int sectorNumber);
+  /**
+   * @brief Shared crossing-zone state machine used by checkStartFinish and
+   * checkSectorLine. Detects entry, buffers GPS fixes inside the zone, and
+   * interpolates the exact crossing point on exit.
+   *
+   * @param currentLat / currentLng Current GPS position.
+   * @param pointALat / pointALng Line endpoint A.
+   * @param pointBLat / pointBLng Line endpoint B.
+   * @param crossingFlag Reference to the per-line in-zone flag.
+   * @param lineLabel Debug label: 0 = start/finish, 2 / 3 = sector.
+   * @param[out] outLat / outLng / outTime / outOdometer Interpolated crossing
+   *   point — only valid when the return value is LINE_DETECT_COMPLETED.
+   * @return LINE_DETECT_NONE / IN_ZONE / COMPLETED. See enum docs.
+   */
+  LineDetectResult _detectLineCrossing(
+      double currentLat, double currentLng,
+      double pointALat, double pointALng,
+      double pointBLat, double pointBLng,
+      bool& crossingFlag,
+      int lineLabel,
+      double& outLat, double& outLng,
+      unsigned long& outTime,
+      double& outOdometer);
+  /**
+   * @brief Handles the logic when a line is crossed, updating sector times.
+   *
+   * @param crossingTime The time when the line was crossed.
+   * @param sectorNumber 0 for start/finish, 2 for sector 2, 3 for sector 3.
+   */
+  void handleLineCrossing(unsigned long crossingTime, int sectorNumber);
+  /**
+   * @brief Updates best sector times if current lap sector times are better.
+   */
+  void updateBestSectors();
+  /**
+   * @brief Catmull-Rom spline interpolation between two points
+   *
+   * @param p0 Value at point 0
+   * @param p1 Value at point 1
+   * @param p2 Value at point 2
+   * @param p3 Value at point 3
+   * @param t Interpolation parameter [0, 1]
+   * @return Interpolated value
+   */
+  double catmullRom(double p0, double p1, double p2, double p3, double t);
+  /**
+   * @brief Computes the interpolation weight based on distances and speeds.
+   * 
+   * @param distA Distance from point A to the line.
+   * @param distB Distance from point B to the line.
+   * @param speedA Speed (in km/h) at point A.
+   * @param speedB Speed (in km/h) at point B.
+   * @return Interpolation weight factor for point A.
+   */
+  double interpolateWeight(double distA, double distB, float speedA, float speedB);
+  /**
+   * @brief Calculates the crossing point's latitude, longitude, and time based on the buffer points and the line defined by two points.
+   *
+   * This function walks the buffered GPS points in chronological order (unwinding the
+   * circular buffer if it wrapped) and finds the first pair of consecutive points on
+   * opposite sides of the line defined by (pointALat, pointALng) and (pointBLat, pointBLng).
+   * It then interpolates the crossing point's latitude, longitude, and time using that pair.
+   *
+   * @param crossingLat Reference to the variable that will store the crossing point's latitude.
+   * @param crossingLng Reference to the variable that will store the crossing point's longitude.
+   * @param crossingTime Reference to the variable that will store the crossing point's time.
+   * @param crossingOdometer Reference to the variable that will store the crossing point's odometer.
+   * @param pointALat Latitude of the first point of the line in decimal degrees.
+   * @param pointALng Longitude of the first point of the line in decimal degrees.
+   * @param pointBLat Latitude of the second point of the line in decimal degrees.
+   * @param pointBLng Longitude of the second point of the line in decimal degrees.
+   * @return True if a valid crossing was found and the out-params are populated.
+   */
+  bool interpolateCrossingPoint(double& crossingLat, double& crossingLng, unsigned long& crossingTime, double& crossingOdometer, double pointALat, double pointALng, double pointBLat, double pointBLng);
+
+  Stream *_serial;
+  DirectionDetector _directionDetector;
+
+  unsigned long millisecondsSinceMidnight = 0;
+  // Timing variables
+  double crossingThresholdMeters;
+  bool raceStarted = false;
+  bool crossing = false;
+  bool forceLinear = true;
+  unsigned long currentLapStartTime = 0;
+  unsigned long lastLapTime = 0;
+  unsigned long bestLapTime = 0;
+  float currentLapOdometerStart = 0.0;
+  float lastLapDistance = 0.0;
+  float bestLapDistance = 0.0;
+  float currentSpeedkmh = 0.0;
+  int bestLapNumber = 0;
+  int laps = 0;
+
+  // Sector timing state
+  int currentSector = 0;  // 0=not started, 1/2/3=in sector
+  unsigned long currentSectorStartTime = 0;
+  bool crossingSector2 = false;
+  bool crossingSector3 = false;
+
+  // Current lap sector times (reset each lap)
+  unsigned long currentLapSector1Time = 0;
+  unsigned long currentLapSector2Time = 0;
+  unsigned long currentLapSector3Time = 0;
+
+  // Best sector times (persistent across laps)
+  unsigned long bestSector1Time = 0;
+  unsigned long bestSector2Time = 0;
+  unsigned long bestSector3Time = 0;
+
+  // Lap numbers that achieved best sectors
+  int bestSector1LapNumber = 0;
+  int bestSector2LapNumber = 0;
+  int bestSector3LapNumber = 0;
+
+  float totalDistanceTraveled = 0;
+  float positionPrevAlt = 0.00;
+  double positionPrevLat = 0.00;
+  double positionPrevLng = 0.00;
+  bool firstPositionReceived = false;  // Explicit flag for first GPS fix detection
+
+  // Previous GPS fix snapshot (used as Catmull-Rom pre-crossing control point)
+  double prevFixLat = 0;
+  double prevFixLng = 0;
+  unsigned long prevFixTime = 0;
+  float prevFixOdometer = 0;
+  float prevFixSpeedKmh = 0;
+  bool hasPrevFix = false;
+
+  double startFinishPointALat = 0.0;
+  double startFinishPointALng = 0.0;
+  double startFinishPointBLat = 0.0;
+  double startFinishPointBLng = 0.0;
+
+  // Sector 2 line coordinates
+  double sector2PointALat = 0.0;
+  double sector2PointALng = 0.0;
+  double sector2PointBLat = 0.0;
+  double sector2PointBLng = 0.0;
+
+  // Sector 3 line coordinates
+  double sector3PointALat = 0.0;
+  double sector3PointALng = 0.0;
+  double sector3PointBLat = 0.0;
+  double sector3PointBLng = 0.0;
+
+  // Line configuration flags — loop() skips detection for unconfigured lines
+  bool startFinishLineConfigured = false;
+  bool sector2LineConfigured = false;
+  bool sector3LineConfigured = false;
+
+  // Consecutive fixes rejected for jumping > GPS_MAX_PLAUSIBLE_JUMP_METERS
+  int consecutiveJumpCount = 0;
+
+  // Zone exits whose crossing interpolation was rejected (see getter docs)
+  unsigned int rejectedCrossingCount = 0;
+
+  // Earth's radius in meters
+  static constexpr double radiusEarth = 6371.0 * 1000;
+
+  // Buffer sizing: AVR exposes RAMEND/RAMSTART so we can tell a Mega (8KB) from a Uno (2KB).
+  // On modern 32-bit cores (nRF52, ESP32, SAMD, RP2040, etc.) those macros are undefined
+  // and would silently evaluate to 0 - defaulting such targets to the small buffer would
+  // defeat the whole point of the hotfix. Assume anyone not on classic AVR has plenty of RAM.
+  #if defined(RAMEND) && defined(RAMSTART)
+    #if ((RAMEND - RAMSTART) > 3000)
+      static const int crossingPointBufferSize = 100;
+    #else
+      static const int crossingPointBufferSize = 25;
+    #endif
+  #else
+    static const int crossingPointBufferSize = 100;
+  #endif
+
+  crossingPointBufferEntry crossingPointBuffer[crossingPointBufferSize];
+  int crossingPointBufferIndex = 0;
+  bool crossingPointBufferFull = false;
+};
+
+#endif
