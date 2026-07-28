@@ -96,7 +96,9 @@ du même bug. **Le rotatif EC11 a été physiquement retiré et remplacé
 par un simple bouton poussoir** (même broche, GPIO10) ; le tactile a
 été retiré de tout le chemin REC/pause/reprise (plus aucun widget
 cliquable sur l'écran Statut ni sur l'écran de confirmation -- juste du
-texte, "PRESS REC" / "PUSH pour reprendre"). Seuls PUSH et BACK
+texte, "PRESS REC" / "PUSH pour reprendre" / "BACK pour arreter", ces
+deux derniers dans la même taille -- cf. section "Ajustements
+d'affichage" plus bas). Seuls PUSH et BACK
 (contacts mécaniques, insensibles au bruit électrique) contrôlent
 désormais l'enregistrement. Le tactile reste actif pour tout le reste
 (navigation anneau par swipe, sélection dans les listes par tap).
@@ -112,6 +114,33 @@ qui dépassait aussitôt le seuil. Fix : capturer un `millis()` frais au
 moment précis de la vérification plutôt que de réutiliser le `nowMs` du
 haut de la boucle. TFT/OLED n'ont jamais eu ce bug (ils utilisaient déjà
 un `millis()` frais à cet endroit).
+
+## Ajustements d'affichage (28/07)
+
+Petite série de retouches suite à la calibration sur le banc
+(`display_only_191`, testées là-bas avant report ici) :
+
+- **Police agrandie** sur l'écran Statut : "Dernier", "Best" et "Tours"
+  passent de `medium_34` à `bold_38` (un cran au-dessus, jugé trop
+  petit à l'usage).
+- **Écran "Enregistrement en pause"** : le texte "PRESS BACK pour stop
+  definitif" devient "BACK pour arreter", raccourci et remonté à la
+  même taille (`bold_38`) que "PUSH pour reprendre" (était `medium_26`,
+  nettement plus petit que sa contrepartie).
+- **Vitesse max par tour** : `checkLapCompletion()` suit désormais la
+  vitesse GPS max atteinte pendant chaque tour (`currentLapMaxSpeedKmh`,
+  mis à jour à chaque trame dans `logGpsRow()`), écrite comme 7e champ
+  dans `/sessions.csv` et affichée dans le détail d'une session
+  (`Tour 3 : 1:23.456  (best)  Vmax 87`). Rétrocompatible : les
+  anciennes sessions à 6 champs (sans vitesse max) s'affichent sans
+  planter, juste sans le "Vmax".
+- **Hints de navigation supprimés** : les petits messages en haut à
+  droite de chaque écran de l'anneau (Circuit, Connexion, Sessions,
+  Réglages, WiFi, Nouveau circuit -- ex. "Tap: choisir BACK: statut")
+  ont été retirés, ainsi que la fonction `createHint()` devenue
+  inutile. Le "PRESS REC" clignotant en bas à droite de l'écran Statut
+  est conservé (ce n'est pas un hint de navigation mais l'invite
+  fonctionnelle qui indique quand appuyer sur REC).
 
 ## Pièges de compilation rencontrés
 

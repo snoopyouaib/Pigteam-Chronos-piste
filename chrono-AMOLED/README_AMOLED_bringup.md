@@ -420,13 +420,26 @@ un seul programme, avec un module `lib/i2c_shared/` factorisant l'init
 I2C partagée entre IMU et tactile (cf. pièges #5, #11, #12). C'est ce
 projet qui sert de base pour construire le vrai firmware.
 
-**`firmware_191/`** (renommé depuis `display_only_191/` une fois passé
-au vrai firmware -- GPS/CourseManager/SD/batterie réels, cf.
-`firmware_191/README.md`). A servi de banc de calibration écran/tactile
-100% simulé au départ (mise en page LVGL, tailles de police, couleurs),
-avant de recevoir la vraie logique métier portée depuis
-`pigteam-chrono-tft`. Écran Statut construit et validé (cf. piège #13
-pour l'historique du bug de couleurs rencontré et résolu dessus).
+**`chrono-AMOLED/`** (vrai firmware, ex `firmware_191/` -- dossier
+remonté à la racine du repo -- lui-même renommé depuis
+`display_only_191/` au moment du passage au GPS/CourseManager/SD/
+batterie réels, cf. `chrono-AMOLED/README.md`). A servi de banc de
+calibration écran/tactile 100% simulé au départ (mise en page LVGL,
+tailles de police, couleurs), avant de recevoir la vraie logique
+métier portée depuis `pigteam-chrono-tft`. Écran Statut construit et
+validé (cf. piège #13 pour l'historique du bug de couleurs rencontré
+et résolu dessus).
+
+**`display_only_191/`** : suite au renommage ci-dessus, un **second**
+projet du même nom a été recréé à part -- banc de test d'affichage à
+nouveau 100% simulé (aucune dépendance GPS/SD/batterie/WiFi réelle),
+maintenu en parallèle de `chrono-AMOLED/` pour continuer à calibrer
+l'écran sans risque sur le vrai firmware. Les deux projets partagent
+le même code d'écrans/navigation/tactile -- toute évolution visuelle
+faite sur l'un est reportée manuellement sur l'autre (pas de lien
+automatique entre les deux). Cf. `chrono-AMOLED/README.md`, section
+"Ajustements d'affichage", pour le détail des dernières retouches
+(taille de police, hints de navigation, vitesse max par tour...).
 
 ---
 
@@ -453,12 +466,21 @@ pour l'historique du bug de couleurs rencontré et résolu dessus).
   seul geste, cf. pièges #16/#17), Circuit/Session/Tours sont des
   **listes défilables** au glissement vertical (conteneur LVGL flex +
   scroll natif), et le **swipe horizontal** change d'écran dans
-  l'anneau. Le bouton **REC** est un vrai bouton tactile rouge (plus
-  un texte clignotant). **BACK arrête l'enregistrement** (PUSH désarmé
-  pendant le REC, par sécurité). L'encodeur rotatif (CLK/DT) reste
-  câblé pour l'instant (rotation = anneau, PUSH = validation en
-  parallèle du tap) -- rien n'empêche de le retirer plus tard si le
-  tout-tactile se confirme à l'usage.
+  l'anneau.
+- **Encodeur rotatif retiré, contrôles REC revus (27-28/07)** :
+  l'EC11 (CLK/DT) a été physiquement retiré (faux contacts tactiles
+  capacitifs constatés en parallèle, cause matérielle distincte) et
+  remplacé par un simple bouton poussoir sur la même broche (PUSH,
+  GPIO10) -- BACK reste un bouton séparé. Plus de bouton REC tactile
+  ni de widget cliquable sur le chemin d'enregistrement : seuls
+  PUSH/BACK (contacts mécaniques) contrôlent le REC, via un écran de
+  confirmation à deux temps façon RaceChrono (PUSH pendant
+  l'enregistrement -> pause ; PUSH sur l'écran de pause -> reprend ;
+  BACK -> arrêt définitif, avec timeout de sécurité 5 min). Détail
+  complet (les deux bugs distincts à l'origine de ce changement, plus
+  le piège d'arithmétique non signée sur le timeout) dans
+  `chrono-AMOLED/README.md`, section "Contrôles REC / arrêt
+  d'enregistrement".
 - **5 polices Teko** (Bold 84/56/38, Medium 34/26 -- taille
   intermédiaire Bold 56 ajoutée pour l'horloge, trop grande en 84px).
   Plage de caractères étendue à Latin-1 (accents français).
@@ -481,7 +503,7 @@ pour l'historique du bug de couleurs rencontré et résolu dessus).
   automatique du bon circuit à 1.4km de distance, log "Geofencing : a
   1.4km de... -- activation directe" observé au banc, GPS en
   extérieur) -- reste à valider la détection de ligne/tour en roulant.
-  Détail complet dans `firmware_191/README.md`.
+  Détail complet dans `chrono-AMOLED/README.md` (dossier renommé depuis).
 - **`WebServerManager` intégré et fonctionnel** (`firmware_191/`) --
   ~20 routes portées telles quelles (Sessions, Comparer, Circuits
   éditables, Statut, Import/Export CSV/RaceChrono, sauvegarde `.zip`,
@@ -499,8 +521,23 @@ pour l'historique du bug de couleurs rencontré et résolu dessus).
   session (le détail tour-par-tour + graphique, source du plantage, a
   été retiré de cette page -- reste accessible via `/lap`, avec le même
   risque résiduel sur la session concernée). Détail complet dans
-  `firmware_191/README.md`.
+  `chrono-AMOLED/README.md` (dossier renommé depuis).
 - Batterie : connecteur MX1.25 confirmé compatible LiPo 3.7V direct
   (recharge/décharge gérées par le circuit du board, pas de buck/boost
   à ajouter) -- pas de batterie de ce type disponible pour test dans
   l'immédiat, à reprendre plus tard.
+- **`display_only_191/` remis à niveau (28/07)** : après le renommage
+  en `chrono-AMOLED/`, le banc avait pris du retard (retrait de
+  l'encodeur, écran de confirmation d'arrêt...) et un fichier
+  intermédiaire avait même écrasé son firmware de test par erreur.
+  Repris depuis le `main.cpp` réel de `chrono-AMOLED/` et
+  "dé-réalisé" (GPS/CourseManager/SD/batterie/WiFi remplacés par une
+  simulation RAM aux mêmes signatures de fonctions) pour redevenir
+  100% simulé -- cycle recherche->détecté->REC piloté par la sélection
+  d'un circuit puis PUSH, tours simulés à durée aléatoire (8-29s) pour
+  vérifier dernier/meilleur tour, batterie/horloge/WiFi factices.
+  Petite série de retouches d'affichage testées ici puis reportées sur
+  `chrono-AMOLED/` (police Dernier/Best/Tours agrandie, texte de
+  l'écran de pause raccourci, vitesse max par tour, hints de
+  navigation retirés) -- détail dans `chrono-AMOLED/README.md`, section
+  "Ajustements d'affichage".
