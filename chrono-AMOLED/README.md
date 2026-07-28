@@ -127,13 +127,7 @@ Petite série de retouches suite à la calibration sur le banc
   definitif" devient "BACK pour arreter", raccourci et remonté à la
   même taille (`bold_38`) que "PUSH pour reprendre" (était `medium_26`,
   nettement plus petit que sa contrepartie).
-- **Vitesse max par tour** : `checkLapCompletion()` suit désormais la
-  vitesse GPS max atteinte pendant chaque tour (`currentLapMaxSpeedKmh`,
-  mis à jour à chaque trame dans `logGpsRow()`), écrite comme 7e champ
-  dans `/sessions.csv` et affichée dans le détail d'une session
-  (`Tour 3 : 1:23.456  (best)  Vmax 87`). Rétrocompatible : les
-  anciennes sessions à 6 champs (sans vitesse max) s'affichent sans
-  planter, juste sans le "Vmax".
+- **Vitesse max/min/moy, distance et heure de depart par tour** : `logGpsRow()` accumule desormais ces 5 valeurs a chaque trame GPS pendant l'enregistrement (vitesse mini/maxi/moyenne, distance cumulee par haversine, heure de la 1ere trame du tour), et `checkLapCompletion()` les ecrit en fin de ligne dans `/sessions.csv` (11 champs au total, contre 6 a l'origine puis 7 avec le seul Vmax) avant de tout reinitialiser pour le tour suivant. Affiche sur l'ecran physique (`Tour 3 : 1:23.456  (best)  Vmax 87`) ET sur la page web `/lap`, qui lit desormais ces 5 colonnes directement depuis le carnet -- plus besoin de retelecharger/reparser le log GPS detaille pour les calculer a l'affichage. Retrocompatible a deux niveaux : les anciennes sessions a 6 champs (sans rien) ou 7 champs (Vmax seul, ecran uniquement) continuent de s'afficher sans planter ; sur la page web, ces sessions plus anciennes retombent automatiquement sur l'ancien calcul cote navigateur (fetch de `/download` + parsing JS), qui ne s'execute plus du tout des qu'une session est entierement au nouveau format.
 - **Hints de navigation supprimés** : les petits messages en haut à
   droite de chaque écran de l'anneau (Circuit, Connexion, Sessions,
   Réglages, WiFi, Nouveau circuit -- ex. "Tap: choisir BACK: statut")

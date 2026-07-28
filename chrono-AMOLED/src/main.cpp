@@ -349,6 +349,19 @@ static double geoBearingDeg(double lat1, double lng1, double lat2, double lng2) 
   return fmod(degrees(atan2(y, x)) + 360.0, 360.0);
 }
 
+// Distance a vol d'oiseau entre 2 points GPS (formule de haversine) --
+// utilisee pour cumuler la distance parcourue pendant un tour (cf.
+// currentLapDistanceM dans logGpsRow()/checkLapCompletion()). Reprend
+// exactement le meme calcul que haversineM() cote JS (WebServerManager
+// .cpp, page /lap) -- desormais fait ici, une fois par trame, plutot que
+// re-parcouru par le navigateur a chaque affichage de page.
+static double geoDistanceM(double lat1, double lng1, double lat2, double lng2) {
+  const double R = 6371000.0;
+  double dLat = radians(lat2 - lat1), dLng = radians(lng2 - lng1);
+  double a = sin(dLat / 2) * sin(dLat / 2) + cos(radians(lat1)) * cos(radians(lat2)) * sin(dLng / 2) * sin(dLng / 2);
+  return R * 2 * atan2(sqrt(a), sqrt(1 - a));
+}
+
 static void geoDestinationPoint(double lat, double lng, double bearingDeg, double distanceM, double& outLat, double& outLng) {
   const double R = 6371000.0;
   double delta = distanceM / R;
@@ -594,6 +607,13 @@ static char currentLogPath[40] = "";
 static char currentSessionCompactKey[16] = "";
 static bool recordingEnabled = false;
 static float currentLapMaxSpeedKmh = 0.0f; // remise a 0 a chaque tour termine (checkLapCompletion)
+static float currentLapMinSpeedKmh = -1.0f;   // -1 = pas encore de mesure sur ce tour
+static double currentLapSpeedSumKmh = 0.0;    // pour la moyenne -- somme/echantillons
+static unsigned long currentLapSpeedSamples = 0;
+static double currentLapDistanceM = 0.0;      // cumul haversine entre trames successives
+static bool currentLapHasPrevPoint = false;   // faux juste apres reinit -- evite un saut errone depuis le point du tour precedent
+static double currentLapPrevLat = 0.0, currentLapPrevLng = 0.0;
+static char currentLapStartTimeStr[10] = "--:--:--"; // capturee sur la 1ere trame de chaque tour (cf. logGpsRow())
 
 static void appendSessionLine(const String& line) {
   File f = LittleFS.open(SESSION_LOG_PATH, "a");
@@ -622,6 +642,12 @@ static void startRecording() {
   recordingEnabled = true;
   lastLapCount = 0;
   currentLapMaxSpeedKmh = 0.0f;
+  currentLapMinSpeedKmh = -1.0f;
+  currentLapSpeedSumKmh = 0.0;
+  currentLapSpeedSamples = 0;
+  currentLapDistanceM = 0.0;
+  currentLapHasPrevPoint = false;
+  strncpy(currentLapStartTimeStr, "--:--:--", sizeof(currentLapStartTimeStr));
   appendSessionLine(String("# session demarree ") + currentSessionCompactKey);
   Serial.printf("REC ON : %s\n", currentLogPath);
 }
@@ -641,7 +667,17 @@ static void logGpsRow() {
   double lat = liveData.latitude / 1e7;
   double lng = liveData.longitude / 1e7;
   float speedKmh = liveData.speedMmPerS / 1000.0f * 3.6f;
+
+  // 1ere trame accumulee depuis la derniere reinitialisation (REC ON ou
+  // tour precedent juste ecrit) -- c'est le debut reel du tour en cours.
+  if (currentLapSpeedSamples == 0) strncpy(currentLapStartTimeStr, timeBuf, sizeof(currentLapStartTimeStr));
+
   if (speedKmh > currentLapMaxSpeedKmh) currentLapMaxSpeedKmh = speedKmh;
+  if (currentLapMinSpeedKmh < 0 || speedKmh < currentLapMinSpeedKmh) currentLapMinSpeedKmh = speedKmh;
+  currentLapSpeedSumKmh += speedKmh;
+  currentLapSpeedSamples++;
+  if (currentLapHasPrevPoint) currentLapDistanceM += geoDistanceM(currentLapPrevLat, currentLapPrevLng, lat, lng);
+  currentLapPrevLat = lat; currentLapPrevLng = lng; currentLapHasPrevPoint = true;
 
   unsigned long currentLapMs, bestLapMs; bool hasBest; int lapsCount;
   getDisplayState(currentLapMs, bestLapMs, hasBest, lapsCount);
@@ -668,12 +704,33 @@ static void checkLapCompletion() {
   formatLapTime(getLastFinishedLapMs(), lapBuf, sizeof(lapBuf));
   formatLapTime(hasBest ? bestLapMs : 0, bestBuf, sizeof(bestBuf));
 
-  char line[144];
-  snprintf(line, sizeof(line), "%s,%s,%d,%s,%s,%s,%.0f",
-           dateBuf, timeBuf, lapsCount, lapBuf, bestBuf, getActiveCourseNameForDisplay(), currentLapMaxSpeedKmh);
+  float avgSpeedKmh = (currentLapSpeedSamples > 0) ? (float)(currentLapSpeedSumKmh / currentLapSpeedSamples) : 0.0f;
+  float minSpeedKmh = (currentLapMinSpeedKmh < 0) ? 0.0f : currentLapMinSpeedKmh;
+  float distanceKm = (float)(currentLapDistanceM / 1000.0);
+
+  // 11 champs desormais (etait 6, puis 7 avec Vmax) -- toujours ajoutes
+  // EN FIN de ligne, jamais en milieu : les lecteurs existants (page
+  // /lap, ecran physique) qui ne lisent que les 6-7 premiers champs
+  // continuent de fonctionner sans modification sur les anciennes ET
+  // les nouvelles sessions (retrocompatibilite, meme principe que pour
+  // Vmax cf. README).
+  char line[192];
+  snprintf(line, sizeof(line), "%s,%s,%d,%s,%s,%s,%.0f,%.0f,%.0f,%.2f,%s",
+           dateBuf, timeBuf, lapsCount, lapBuf, bestBuf, getActiveCourseNameForDisplay(),
+           currentLapMaxSpeedKmh, minSpeedKmh, avgSpeedKmh, distanceKm, currentLapStartTimeStr);
   appendSessionLine(line);
-  Serial.printf("Tour %d enregistre : %s (meilleur : %s, Vmax %.0f km/h)\n", lapsCount, lapBuf, bestBuf, currentLapMaxSpeedKmh);
-  currentLapMaxSpeedKmh = 0.0f; // repart de zero pour le tour suivant
+  Serial.printf("Tour %d enregistre : %s (meilleur : %s, Vmax %.0f, Vmin %.0f, Vmoy %.0f km/h, %.2f km, depart %s)\n",
+                lapsCount, lapBuf, bestBuf, currentLapMaxSpeedKmh, minSpeedKmh, avgSpeedKmh, distanceKm, currentLapStartTimeStr);
+
+  // Reinitialisation pour le tour suivant -- meme moment que l'ancien
+  // "currentLapMaxSpeedKmh = 0.0f" seul avant cet ajout.
+  currentLapMaxSpeedKmh = 0.0f;
+  currentLapMinSpeedKmh = -1.0f;
+  currentLapSpeedSumKmh = 0.0;
+  currentLapSpeedSamples = 0;
+  currentLapDistanceM = 0.0;
+  currentLapHasPrevPoint = false;
+  strncpy(currentLapStartTimeStr, "--:--:--", sizeof(currentLapStartTimeStr));
 }
 
 // ===================== WebServerManager (WiFi/telechargement) =====================
