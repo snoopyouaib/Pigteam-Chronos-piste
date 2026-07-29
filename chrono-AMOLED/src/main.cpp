@@ -673,6 +673,16 @@ static void logGpsRow() {
   unsigned long currentLapMs, bestLapMs; bool hasBest; int lapsCount;
   getDisplayState(currentLapMs, bestLapMs, hasBest, lapsCount);
 
+  // Capture generale du depart : 1ere trame accumulee depuis le dernier
+  // reset (par checkLapCompletion() a la fin du tour precedent, ou par
+  // le plateau ci-dessous pour le tour 1) -- couvre TOUS les tours,
+  // pas seulement le 1er. Sans cette ligne (oubliee dans la version
+  // precedente en limitant la capture au seul cas lapsCount==0 du
+  // plateau), le depart des tours 2, 3, etc. restait bloque sur le
+  // placeholder "--:--:--" ecrit par checkLapCompletion() -- confirme
+  // sur log reel du 29/07 (tour 2 sans depart).
+  if (currentLapSpeedSamples == 0) strncpy(currentLapStartTimeStr, timeBuf, sizeof(currentLapStartTimeStr));
+
   // current_lap_ms qui stagne (plateau -- observe sur le terrain le
   // 28/07 : reste a 0 pendant 27s, le temps que le geofence s'arme,
   // avant le vrai depart du 1er tour) : tant qu'AUCUN tour n'est encore

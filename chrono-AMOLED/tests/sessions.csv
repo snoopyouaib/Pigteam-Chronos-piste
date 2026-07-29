@@ -56,3 +56,7 @@ date,local_time,lap_number,lap_time,best_lap_time,circuit
 # session demarree 20260728_123811
 2026-07-28,12:39:58,1,1:17.592,1:17.592,PigTeam_track,53,23,40,1.20,12:38:12
 # session arretee
+# session demarree 20260729_072834
+2026-07-29,07:30:06,1,1:12.680,1:12.680,PigTeam_track,53,26,43,0.86,07:28:53
+2026-07-29,07:31:18,2,1:11.826,1:11.826,PigTeam_track,55,27,43,0.85,--:--:--
+# session arretee
