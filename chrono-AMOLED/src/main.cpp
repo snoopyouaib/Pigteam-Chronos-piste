@@ -189,6 +189,18 @@ static TrackConfig myTracks = { "Mes circuits PIGTEAM", "PIGTEAM", {}, 0 };
 static CourseManager* courseManager = nullptr;
 static int lastLapCount = 0;
 
+// Fige l'affichage du chrono sur le temps du tour qui vient de se
+// terminer pendant LAP_DISPLAY_FREEZE_MS apres le passage de ligne,
+// au lieu de repartir instantanement a 0 -- laisse le temps de lire le
+// tour avant que le compteur du tour suivant prenne sa place. Remis a
+// jour a CHAQUE tour termine (checkLapCompletion()), donc un tour plus
+// rapide que ce delai ecourte naturellement le gel precedent au profit
+// du nouveau temps. N'affecte que l'affichage : le chrono/la detection
+// sous-jacents (CourseManager/DovesLapTimer) continuent normalement,
+// rien n'est retarde cote enregistrement.
+static unsigned long lapFreezeUntilMs = 0;
+static const unsigned long LAP_DISPLAY_FREEZE_MS = 10000UL;
+
 static int splitCsvLine(const String& line, String fields[], int maxFields) {
   int count = 0, start = 0;
   for (int i = 0; i <= (int)line.length() && count < maxFields; i++) {
@@ -642,6 +654,7 @@ static void startRecording() {
   loggingOk = true;
   recordingEnabled = true;
   lastLapCount = 0;
+  lapFreezeUntilMs = 0;
   currentLapMaxSpeedKmh = 0.0f;
   currentLapMinSpeedKmh = -1.0f;
   currentLapSpeedSumKmh = 0.0;
@@ -732,6 +745,7 @@ static void checkLapCompletion() {
   getDisplayState(currentLapMs, bestLapMs, hasBest, lapsCount);
   if (lapsCount <= lastLapCount) return;
   lastLapCount = lapsCount;
+  lapFreezeUntilMs = millis() + LAP_DISPLAY_FREEZE_MS;
 
   char dateBuf[12], timeBuf[10];
   getLocalDateTime(dateBuf, sizeof(dateBuf), timeBuf, sizeof(timeBuf));
@@ -1229,7 +1243,11 @@ static void updateStatusScreen(unsigned long nowMs) {
     lv_obj_add_flag(lblTours, LV_OBJ_FLAG_HIDDEN);
 
   } else {
-    if (currentLapMs > 0) {
+    if (millis() < lapFreezeUntilMs) {
+      // Tour vient de se terminer -- affiche encore son temps fige,
+      // plutot que de reafficher direct le chrono du tour suivant.
+      formatLapTime(getLastFinishedLapMs(), buf, sizeof(buf));
+    } else if (currentLapMs > 0) {
       // Ligne franchie (getRaceStarted() true cote CourseManager/DovesLapTimer) -- chrono actif.
       formatLapTime(currentLapMs, buf, sizeof(buf));
     } else {

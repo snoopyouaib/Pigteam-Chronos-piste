@@ -220,6 +220,12 @@ static int simLapsCount = 0;
 static unsigned long simCurrentLapTargetMs = 20000;
 static unsigned long randomLapDurationMs() { return (unsigned long)random(8000, 30000); } // [8s, 30s[
 
+// Fige l'affichage du chrono sur le temps du tour qui vient de se
+// terminer pendant LAP_DISPLAY_FREEZE_MS, comme au reel -- cf.
+// commentaire equivalent dans chrono-AMOLED/src/main.cpp.
+static unsigned long lapFreezeUntilMs = 0;
+static const unsigned long LAP_DISPLAY_FREEZE_MS = 10000UL;
+
 static void getDisplayState(unsigned long& currentLapMs, unsigned long& bestLapMs, bool& hasBest, int& lapsCount) {
   currentLapMs = recordingEnabled ? (millis() - simLapStartMs) : 0;
   hasBest = simBestLapMs != ULONG_MAX;
@@ -236,6 +242,7 @@ static void startRecording() {
   simLastLapMs = 0;
   simBestLapMs = ULONG_MAX;
   simLapsCount = 0;
+  lapFreezeUntilMs = 0;
 
   SessionSummary s;
   s.compactKey = String("SIM_") + String(millis() / 1000);
@@ -267,6 +274,7 @@ static void checkLapCompletion() {
   simLastLapMs = elapsed;
   if (simLastLapMs < simBestLapMs) simBestLapMs = simLastLapMs;
   simLapsCount++;
+  lapFreezeUntilMs = millis() + LAP_DISPLAY_FREEZE_MS;
 
   if (!simSessions.empty()) {
     SessionSummary& s = simSessions.back();
@@ -585,7 +593,11 @@ static void updateStatusScreen(unsigned long nowMs) {
     lv_obj_add_flag(lblTours, LV_OBJ_FLAG_HIDDEN);
 
   } else {
-    if (currentLapMs > 0) {
+    if (millis() < lapFreezeUntilMs) {
+      // Tour vient de se terminer -- affiche encore son temps fige,
+      // plutot que de reafficher direct le chrono du tour suivant.
+      formatLapTime(getLastFinishedLapMs(), buf, sizeof(buf));
+    } else if (currentLapMs > 0) {
       // Ligne franchie (getRaceStarted() true cote CourseManager/DovesLapTimer) -- chrono actif.
       formatLapTime(currentLapMs, buf, sizeof(buf));
     } else {
