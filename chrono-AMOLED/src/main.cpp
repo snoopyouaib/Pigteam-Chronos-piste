@@ -725,6 +725,14 @@ static bool currentLapHasPrevPoint = false;   // faux juste apres reinit -- evit
 static double currentLapPrevLat = 0.0, currentLapPrevLng = 0.0;
 static char currentLapStartTimeStr[10] = "--:--:--"; // capturee sur la 1ere trame de chaque tour (cf. logGpsRow())
 static unsigned long lastLapMsSeen = 0xFFFFFFFFUL; // detecte le plateau/redemarrage de current_lap_ms (cf. logGpsRow())
+// Angle max a droite/a gauche par tour -- leanAngleDeg positif = droite,
+// negatif = gauche (convention confirmee au banc le 29/07, cf.
+// ImuManager.cpp). On stocke l'angle a droite comme un max simple, et
+// l'angle a gauche comme un min (le plus negatif), affiche ensuite en
+// valeur absolue -- 0.0f de depart convient dans les deux cas (aucun
+// angle ne peut etre "moins penche" que 0 au repos).
+static float currentLapMaxAngleRightDeg = 0.0f;
+static float currentLapMaxAngleLeftDeg = 0.0f; // le plus negatif observe (0 = pas encore penche a gauche)
 
 static void appendSessionLine(const String& line) {
   File f = LittleFS.open(SESSION_LOG_PATH, "a");
@@ -763,6 +771,8 @@ static void startRecording() {
   currentLapStoppieCount = 0;
   wheelieStartMs = 0; stoppieStartMs = 0;
   wheelieCounted = false; stoppieCounted = false;
+  currentLapMaxAngleRightDeg = 0.0f;
+  currentLapMaxAngleLeftDeg = 0.0f;
   lastLapMsSeen = 0xFFFFFFFFUL; // force la capture du depart des le tout 1er point de la session
   strncpy(currentLapStartTimeStr, "--:--:--", sizeof(currentLapStartTimeStr));
   appendSessionLine(String("# session demarree ") + currentSessionCompactKey);
@@ -825,6 +835,8 @@ static void logGpsRow() {
     currentLapStoppieCount = 0;
     wheelieStartMs = 0; stoppieStartMs = 0;
     wheelieCounted = false; stoppieCounted = false;
+    currentLapMaxAngleRightDeg = 0.0f;
+    currentLapMaxAngleLeftDeg = 0.0f;
     strncpy(currentLapStartTimeStr, timeBuf, sizeof(currentLapStartTimeStr));
   }
   lastLapMsSeen = currentLapMs;
@@ -838,6 +850,9 @@ static void logGpsRow() {
 
   float accelXmg, accelYmg, accelZmg, gyroXdps, gyroYdps, gyroZdps;
   getImuRaw(accelXmg, accelYmg, accelZmg, gyroXdps, gyroYdps, gyroZdps);
+  float leanAngleDeg = getLeanAngleDeg();
+  if (leanAngleDeg > currentLapMaxAngleRightDeg) currentLapMaxAngleRightDeg = leanAngleDeg;   // positif = droite
+  if (leanAngleDeg < currentLapMaxAngleLeftDeg) currentLapMaxAngleLeftDeg = leanAngleDeg;     // negatif = gauche (le plus negatif = le plus penche)
 
   // 7 champs IMU ajoutes EN FIN de ligne (angle d'inclinaison + valeurs
   // brutes accelero/gyro), meme principe de retrocompatibilite que pour
@@ -849,7 +864,7 @@ static void logGpsRow() {
                  timeBuf, millis(), lat, lng, speedKmh,
                  gpsFixStatus, gpsNumSVs, lapsCount,
                  getActiveCourseNameForDisplay(), currentLapMs,
-                 getLeanAngleDeg(), accelXmg, accelYmg, accelZmg, gyroXdps, gyroYdps, gyroZdps);
+                 leanAngleDeg, accelXmg, accelYmg, accelZmg, gyroXdps, gyroYdps, gyroZdps);
 
   static unsigned long lastFlush = 0;
   if (millis() - lastFlush >= 5000) { lastFlush = millis(); logFile.flush(); }
@@ -873,23 +888,27 @@ static void checkLapCompletion() {
   float minSpeedKmh = (currentLapMinSpeedKmh < 0) ? 0.0f : currentLapMinSpeedKmh;
   float distanceKm = (float)(currentLapDistanceM / 1000.0);
 
-  // 13 champs desormais (etait 6, puis 7 avec Vmax, puis 11 avec
-  // Vmin/Vmoy/distance/depart) -- toujours ajoutes EN FIN de ligne,
-  // jamais en milieu : les lecteurs existants (page /lap, ecran
-  // physique) qui ne lisent que les premiers champs continuent de
-  // fonctionner sans modification sur les anciennes ET les nouvelles
-  // sessions (retrocompatibilite, meme principe que pour Vmax cf.
-  // README). Compteurs wheelie/stoppie estimes par seuil sur le gyro
-  // (cf. checkWheelieStoppie()) -- 0 si l'IMU n'a pas ete detectee.
-  char line[224];
-  snprintf(line, sizeof(line), "%s,%s,%d,%s,%s,%s,%.0f,%.0f,%.0f,%.2f,%s,%d,%d",
+  // 15 champs desormais (etait 6, puis 7 avec Vmax, puis 11 avec
+  // Vmin/Vmoy/distance/depart, puis 13 avec wheelie/stoppie) -- toujours
+  // ajoutes EN FIN de ligne, jamais en milieu : les lecteurs existants
+  // (page /lap, ecran physique) qui ne lisent que les premiers champs
+  // continuent de fonctionner sans modification sur les anciennes ET
+  // les nouvelles sessions (retrocompatibilite, meme principe que pour
+  // Vmax cf. README). Angle a droite/gauche max en valeur absolue (le
+  // signe -- droite positif, gauche negatif -- ne sert qu'en interne
+  // pour l'accumulation, cf. currentLapMaxAngleRightDeg/LeftDeg) ; 0.0
+  // pour les deux si l'IMU n'a pas ete detectee.
+  char line[248];
+  snprintf(line, sizeof(line), "%s,%s,%d,%s,%s,%s,%.0f,%.0f,%.0f,%.2f,%s,%d,%d,%.0f,%.0f",
            dateBuf, timeBuf, lapsCount, lapBuf, bestBuf, getActiveCourseNameForDisplay(),
            currentLapMaxSpeedKmh, minSpeedKmh, avgSpeedKmh, distanceKm, currentLapStartTimeStr,
-           currentLapWheelieCount, currentLapStoppieCount);
+           currentLapWheelieCount, currentLapStoppieCount,
+           currentLapMaxAngleRightDeg, fabsf(currentLapMaxAngleLeftDeg));
   appendSessionLine(line);
-  Serial.printf("Tour %d enregistre : %s (meilleur : %s, Vmax %.0f, Vmin %.0f, Vmoy %.0f km/h, %.2f km, depart %s, %d wheelie(s), %d stoppie(s))\n",
+  Serial.printf("Tour %d enregistre : %s (meilleur : %s, Vmax %.0f, Vmin %.0f, Vmoy %.0f km/h, %.2f km, depart %s, %d wheelie(s), %d stoppie(s), angle D%.0f/G%.0f)\n",
                 lapsCount, lapBuf, bestBuf, currentLapMaxSpeedKmh, minSpeedKmh, avgSpeedKmh, distanceKm, currentLapStartTimeStr,
-                currentLapWheelieCount, currentLapStoppieCount);
+                currentLapWheelieCount, currentLapStoppieCount,
+                currentLapMaxAngleRightDeg, fabsf(currentLapMaxAngleLeftDeg));
 
   // Reinitialisation pour le tour suivant -- filet de securite : en
   // temps normal, logGpsRow() se reinitialise deja tout seul sur la
@@ -904,6 +923,8 @@ static void checkLapCompletion() {
   strncpy(currentLapStartTimeStr, "--:--:--", sizeof(currentLapStartTimeStr));
   currentLapWheelieCount = 0;
   currentLapStoppieCount = 0;
+  currentLapMaxAngleRightDeg = 0.0f;
+  currentLapMaxAngleLeftDeg = 0.0f;
   wheelieStartMs = 0; stoppieStartMs = 0;
   wheelieCounted = false; stoppieCounted = false;
 }

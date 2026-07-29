@@ -220,6 +220,17 @@ pour ne compter qu'une fois un evenement soutenu.
   observe), gyroY positif = roue arriere qui se leve (stoppie, pic a
   +292°/s observe), les deux mouvements et leurs transitions bien
   visibles dans une seule capture continue.
+- **Angle max a droite/a gauche par tour ajoute** (meme jour) : suite
+  logique du roulis deja logge point par point -- `logGpsRow()`
+  maintient desormais `currentLapMaxAngleRightDeg` (max simple) et
+  `currentLapMaxAngleLeftDeg` (min simple, le plus negatif) a chaque
+  trame, ecrits par `checkLapCompletion()` comme 2 champs
+  supplementaires en fin de ligne de `/sessions.csv` (`%.0f,%.0f` en
+  valeur absolue -- 15 champs desormais). Affiche sur la page web
+  `/lap` (colonnes "Angle D"/"Angle G", `--` si absent sur une session
+  plus ancienne). Toujours pas d'affichage ecran physique (meme
+  principe que l'angle en continu : pas le temps de regarder un ecran
+  en pleine inclinaison).
 
 ## Nouveautés du 29/07
 
