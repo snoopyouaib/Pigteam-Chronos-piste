@@ -263,6 +263,43 @@ tour** : pas de ligne de départ-arrivée, pas de geofencing, pas de
 - Réutilise entièrement les contrôles REC/pause/arrêt existants (PUSH/
   BACK, écran de confirmation) -- aucune nouvelle interaction à
   apprendre, seule la détection de tour est désactivée.
+- **Bug corrige : session Route invisible sur le webserver** (meme
+  jour, trouve en testant l'ajout des noms de circuit) :
+  `finalizeRouteSessionIfNeeded()` n'etait appelee qu'a la confirmation
+  d'arret definitif (`SCR_CONFIRM_STOP`), qui intervient APRES que
+  `stopRecording()` ait deja ecrit le marqueur `# session arretee` --
+  la ligne "Route" atterrissait donc EN DEHORS du bloc demarree/arretee
+  que `loadSessionSummaries()` utilise pour rattacher les tours a une
+  session, et etait completement ignoree (`lapCount` reste a 0) : ni
+  "Route", ni nom de circuit, ni lien de detail n'apparaissaient nulle
+  part sur le webserver. Fix : appel deplace au tout debut de
+  `stopRecording()` lui-meme, avant l'ecriture du marqueur. Consequence
+  du deplacement (`stopRecording()` sert aussi de pause) : si Route est
+  mis en pause puis repris plusieurs fois avant l'arret definitif,
+  chaque segment ecrit desormais sa propre ligne "Route" au lieu d'une
+  seule pour tout le trajet -- pas une perte par rapport a avant (les
+  donnees etaient deja perdues/invisibles), juste rendu visible.
+  `SessionSummaryLite` retient desormais aussi le nom de circuit de la
+  session (`isRouteSummary()`, detection par `circuit == "Route"`) --
+  la carte d'accueil et la liste `/debug` affichent "Route -- duree
+  XX:XX.XXX" au lieu de "N tour(s) -- meilleur : ...". Sur la page
+  `/lap`, meme detection en 1ere passe (scalaire, avant le titre) :
+  titre "Detail du parcours (mode Route)", colonnes Tour/Diff/Circuit
+  masquees (sans objet -- une seule ligne, pas de classement, circuit
+  toujours "Route"), seule la Duree reste en 1ere colonne suivie de
+  Depart/Distance/V.max/V.min/V.moy/Wheelie/Stoppie/Angle D/Angle G,
+  identiques a un tour de circuit.
+- **Nom de circuit affiche sur chaque session** (accueil + `/debug`,
+  meme jour) : la carte d'une session circuit affiche desormais
+  "N tour(s) -- meilleur : TIME -- NomDuCircuit". Pour une session
+  Route, le resume s'enrichit de la distance et de la V.moy totales
+  ("Route -- duree TIME -- X.XX km -- V.moy XX km/h") -- possible
+  directement car une session Route n'a qu'UNE seule ligne dans
+  `/sessions.csv` (le total du trajet). Pour une session multi-tours,
+  distance/V.moy ne sont PAS affichees a ce niveau resume : la derniere
+  ligne lue par `loadSessionSummaries()` ne serait que le dernier tour,
+  pas un cumul sur toute la session -- afficher ca aurait ete trompeur.
+  Toujours accessible via le detail complet tour par tour (`/lap`).
 
 - **Timeout automatique de l'écran de pause supprimé** : "Enregistrement
   en pause" (BACK pendant le REC) restait auparavant armé au maximum

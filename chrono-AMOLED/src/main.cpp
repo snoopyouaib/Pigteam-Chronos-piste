@@ -750,6 +750,7 @@ static bool currentLapHasPrevPoint = false;   // faux juste apres reinit -- evit
 static double currentLapPrevLat = 0.0, currentLapPrevLng = 0.0;
 static char currentLapStartTimeStr[10] = "--:--:--"; // capturee sur la 1ere trame de chaque tour (cf. logGpsRow())
 static unsigned long lastLapMsSeen = 0xFFFFFFFFUL; // detecte le plateau/redemarrage de current_lap_ms (cf. logGpsRow())
+static void finalizeRouteSessionIfNeeded(); // definie plus bas -- forward-declaree pour etre appelable depuis stopRecording() (cf. fix ordre d'ecriture, 29/07)
 // Angle max a droite/a gauche par tour -- leanAngleDeg positif = droite,
 // negatif = gauche (convention confirmee au banc le 29/07, cf.
 // ImuManager.cpp). On stocke l'angle a droite comme un max simple, et
@@ -808,6 +809,21 @@ static void startRecording() {
 static void stopRecording() {
   if (!recordingEnabled) return;
   if (loggingOk) { logFile.flush(); logFile.close(); loggingOk = false; }
+  // IMPORTANT : appele ICI, avant "# session arretee" -- une version
+  // precedente l'appelait seulement au moment de la confirmation d'arret
+  // definitif (SCR_CONFIRM_STOP), qui intervient APRES ce stopRecording()
+  // (celui-ci sert aussi de pause, cf. handlePush()/SCR_STATUS). Consequence
+  // reelle constatee : la ligne "Route" atterrissait APRES le marqueur
+  // "# session arretee" deja ecrit, donc EN DEHORS du bloc demarree/arretee
+  // -- loadSessionSummaries() l'ignorait completement (current==nullptr des
+  // ce marqueur vu), rendant le resume Route invisible sur la page web
+  // (carte d'accueil ET lien /lap absents, lapCount reste a 0). Consequence
+  // du deplacement : si Route est mis en pause puis reprise plusieurs fois
+  // avant l'arret definitif, chaque segment ecrit desormais sa propre ligne
+  // "Route" (mêmes accumulateurs deja remis a zero par startRecording() a
+  // chaque reprise, cf. plus haut -- pas de perte supplementaire par
+  // rapport a avant, juste rendu visible/correctement rattache).
+  finalizeRouteSessionIfNeeded(); // no-op si routeMode est false
   appendSessionLine("# session arretee");
   recordingEnabled = false;
   Serial.printf("REC OFF : %s ferme.\n", currentLogPath);
@@ -2092,7 +2108,13 @@ static void handleBack() {
       // pour qu'aucun faux contact ne puisse relancer l'enregistrement une
       // fois qu'on a quitte la piste. Le timeout dans loop() couvre le cas
       // ou on oublie de confirmer avant de prendre la route.
-      finalizeRouteSessionIfNeeded(); // no-op si routeMode est false
+      // finalizeRouteSessionIfNeeded() est desormais appelee dans
+      // stopRecording() lui-meme, avant "# session arretee" -- cf. son
+      // commentaire -- plus besoin ici. Pas de risque de double-ecriture :
+      // stopRecording() a son propre garde-fou "if (!recordingEnabled)
+      // return;" en tout debut de fonction, donc un appel ici serait de
+      // toute facon un no-op puisque recordingEnabled est deja repasse a
+      // false par le premier appel (PUSH pause, cf. handlePush()).
       activateAutoMode(); // reset complet du courseManager + des flags d'armement
       lastDefinitiveStopMs = millis(); // cf. STATUS_REC_GRACE_AFTER_STOP_MS -- le geofencing peut rearmer le circuit en ~1s
       goToScreen(SCR_STATUS);
