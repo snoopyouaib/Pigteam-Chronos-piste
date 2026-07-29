@@ -49,6 +49,7 @@
 #include "GpsManager.h"
 #include "adc_bsp.h"
 #include "SdLogStorage.h"
+#include "ImuManager.h"
 #include "WebServerManager.h"
 
 // ===================== Pins (valides au bring-up 1.91) =====================
@@ -681,7 +682,7 @@ static void startRecording() {
     Serial.printf("REC : impossible de creer %s\n", currentLogPath);
     return;
   }
-  logFile.println("local_time,millis_boot,lat,lng,speed_kmh,fix,sats,laps,circuit,current_lap_ms");
+  logFile.println("local_time,millis_boot,lat,lng,speed_kmh,fix,sats,laps,circuit,current_lap_ms,lean_angle_deg,accel_x_mg,accel_y_mg,accel_z_mg,gyro_x_dps,gyro_y_dps,gyro_z_dps");
   logFile.flush();
   loggingOk = true;
   recordingEnabled = true;
@@ -762,10 +763,20 @@ static void logGpsRow() {
   if (currentLapHasPrevPoint) currentLapDistanceM += geoDistanceM(currentLapPrevLat, currentLapPrevLng, lat, lng);
   currentLapPrevLat = lat; currentLapPrevLng = lng; currentLapHasPrevPoint = true;
 
-  logFile.printf("%s,%lu,%.7f,%.7f,%.1f,%u,%u,%d,%s,%lu\n",
+  float accelXmg, accelYmg, accelZmg, gyroXdps, gyroYdps, gyroZdps;
+  getImuRaw(accelXmg, accelYmg, accelZmg, gyroXdps, gyroYdps, gyroZdps);
+
+  // 7 champs IMU ajoutes EN FIN de ligne (angle d'inclinaison + valeurs
+  // brutes accelero/gyro), meme principe de retrocompatibilite que pour
+  // les champs deja ajoutes a /sessions.csv : les lecteurs existants qui
+  // ne lisent que les 10 premiers champs continuent de fonctionner sans
+  // modification sur les logs enregistres avant cet ajout. Valeurs a 0
+  // si l'IMU n'a pas ete detectee au demarrage (cf. imuOk).
+  logFile.printf("%s,%lu,%.7f,%.7f,%.1f,%u,%u,%d,%s,%lu,%.2f,%.1f,%.1f,%.1f,%.2f,%.2f,%.2f\n",
                  timeBuf, millis(), lat, lng, speedKmh,
                  gpsFixStatus, gpsNumSVs, lapsCount,
-                 getActiveCourseNameForDisplay(), currentLapMs);
+                 getActiveCourseNameForDisplay(), currentLapMs,
+                 getLeanAngleDeg(), accelXmg, accelYmg, accelZmg, gyroXdps, gyroYdps, gyroZdps);
 
   static unsigned long lastFlush = 0;
   if (millis() - lastFlush >= 5000) { lastFlush = millis(); logFile.flush(); }
@@ -1921,6 +1932,11 @@ void setup() {
 
   adc_bsp_init();
 
+  bool imuReady = initImu();
+  Serial.printf("IMU (QMI8658) : %s -- lean angle %s.\n",
+                imuReady ? "detecte" : "absent/en panne",
+                imuReady ? "logge (log_*.csv)" : "indisponible (0 dans le log)");
+
   pinMode(BACK_BUTTON, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(BACK_BUTTON), backButtonISR, FALLING);
   pinMode(PUSH_BUTTON, INPUT_PULLUP);
@@ -1965,6 +1981,7 @@ void loop() {
   gpsUpdateFromLiveData();
   webServerManager.loop();
   handleSerialCommands();
+  imuTick(); // inconditionnel (meme hors REC) -- garde le filtre d'angle "chaud"
 
   if (newGpsData) {
     newGpsData = false;

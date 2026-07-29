@@ -138,6 +138,52 @@ Petite série de retouches suite à la calibration sur le banc
   est conservé (ce n'est pas un hint de navigation mais l'invite
   fonctionnelle qui indique quand appuyer sur REC).
 
+## IMU (QMI8658) -- angle d'inclinaison en virage, log seul (29/07)
+
+Le board 1.91 a un accelerometre+gyroscope 6 axes (QMI8658) deja
+partage sur le meme bus I2C que le tactile FT3168 -- valide au
+bring-up (`README_AMOLED_bringup.md`, etape "02_I2C_QMI8658") mais
+jamais integre au firmware jusqu'ici. Ajout demande : **angle
+d'inclinaison en virage (lean angle), journalise uniquement -- aucun
+affichage ecran** (pas le temps de regarder un ecran en pleine
+inclinaison).
+
+- **Pas de lib Arduino/Wire** : une lib QMI8658 classique
+  (`Wire`/`TwoWire`) ferait son propre `i2c_driver_install()` sur le
+  meme port I2C_NUM_0 deja pris par `I2C_master_Init()` (driver ESP-IDF
+  natif) -- exactement le conflit que `touch_bsp.c` evite deja pour le
+  FT3168 (meme bus physique). Nouveau module `lib/imu/ImuManager.*`
+  ecrit en registres bas niveau via `I2C_write_buff`/`I2C_read_buff`
+  (memes fonctions partagees que le tactile), pas de dependance
+  externe ajoutee a `platformio.ini`.
+- **Angle par filtre complementaire** (98% integration gyro / 2%
+  recalage accelerometre) plutot qu'un simple `atan2(accel)` : sous
+  acceleration laterale en virage, l'accelerometre seul confond
+  gravite et force centripete et donnerait un angle faux. Le gyro
+  integre est precis a court terme mais derive lentement -- le
+  melange des deux reste correct dans la duree sans etre perturbe par
+  un virage de quelques secondes.
+- **7 champs ajoutes en fin de ligne** de `log_*.csv`
+  (`lean_angle_deg,accel_x_mg,accel_y_mg,accel_z_mg,gyro_x_dps,gyro_y_dps,gyro_z_dps`),
+  meme principe de retrocompatibilite que les ajouts precedents a
+  `/sessions.csv` -- les valeurs brutes sont loggees en plus de l'angle
+  calcule, pour pouvoir recalculer/corriger en post-traitement si le
+  mapping d'axe s'avere faux une fois monte definitivement.
+- **⚠️ A valider physiquement avant de faire confiance aux logs**,
+  exactement comme au bring-up d'origine : le mapping de registres
+  (WHO_AM_I/CTRL/donnees) vient de la datasheet publique QMI8658C et de
+  plusieurs implementations open-source croisees, mais n'a pas ete
+  verifie sur ce firmware precis (contrairement au reste du projet,
+  aucun test au banc n'est possible ici -- pas de vrai capteur sur le
+  banc `display_only_191`). A la premiere mise en route, verifier au
+  Serial : `WHO_AM_I` doit valoir `0x05`, et les valeurs au repos
+  (carte immobile) doivent se stabiliser comme au bring-up (~1g sur un
+  seul axe accelero, gyro quasi nul). **L'axe qui correspond au roulis
+  une fois monte dans le carenage reste aussi a confirmer** (hypothese
+  de travail actuelle : gyro X + `atan2(accelY, accelZ)`, a ajuster
+  dans `ImuManager.cpp` si le montage final donne un axe different --
+  cf. commentaire dedie dans le fichier).
+
 ## Nouveautés du 29/07
 
 - **Écran Connexion enrichi** : en plus de GPS et Circuit, affiche
