@@ -184,6 +184,43 @@ inclinaison).
   dans `ImuManager.cpp` si le montage final donne un axe different --
   cf. commentaire dedie dans le fichier).
 
+## Wheelie / stoppie -- detection par seuil, log seul (29/07)
+
+Suite logique de l'IMU : detecter les levages de roue (avant =
+wheelie, arriere = stoppie). **Pas de calcul d'angle de tangage continu
+ici**, contrairement au roulis -- sous forte acceleration/freinage,
+l'accelerometre confond acceleration lineaire et gravite bien plus
+violemment qu'en virage, un angle calcule serait denue de sens pendant
+exactement les evenements qu'on veut detecter. Approche plus robuste et
+standard en telemetrie moto : **detection par seuil sur la vitesse de
+tangage brute** (gyro Y, cf. mapping d'axe ci-dessous), avec hysteresis
+pour ne compter qu'une fois un evenement soutenu.
+
+- **Mapping d'axe complet** (deduit par symetrie geometrique a partir du
+  test roulis validé sur le vrai board) : roulis = gyroZ (corrige le
+  29/07 -- gyroY avait ete suppose par erreur au depart), tangage =
+  gyroY, lacet = gyroX. Seul le roulis a ete teste physiquement (carte
+  penchee a gauche/droite sur l'etabli) -- tangage/lacet n'ont pas pu
+  l'etre de la meme facon, un wheelie/stoppie ne se simule pas a la
+  main.
+- **2 champs ajoutes en fin de ligne** de `/sessions.csv`
+  (`wheelie_count`, `stoppie_count` -- 13 champs desormais), meme
+  principe de retrocompatibilite que les ajouts precedents.
+- **⚠️ Seuil/durée NON validés sur piste** : `WHEELIE_GYRO_THRESHOLD_DPS`
+  (45°/s) et `WHEELIE_MIN_DURATION_MS` (250ms) sont des valeurs de
+  depart a affiner apres un premier roulage reel selon les faux
+  positifs/negatifs constates (vibrations moteur/route vs vrai levage
+  de roue). Le **sens est confirme et fiable** : une premiere
+  validation par instantanes ponctuels (commande Serial `i`) avait
+  donne des signes contradictoires d'un essai a l'autre (impossible de
+  viser a la main le pic exact d'un mouvement aussi rapide) -- resolu
+  par l'ajout d'une commande `w` qui imprime gyroY en flux continu
+  pendant 3s pendant le geste. Le flux complet confirme sans ambiguite :
+  gyroY negatif = roue avant qui se leve (wheelie, pic a -203°/s
+  observe), gyroY positif = roue arriere qui se leve (stoppie, pic a
+  +292°/s observe), les deux mouvements et leurs transitions bien
+  visibles dans une seule capture continue.
+
 ## Nouveautés du 29/07
 
 - **Écran Connexion enrichi** : en plus de GPS et Circuit, affiche

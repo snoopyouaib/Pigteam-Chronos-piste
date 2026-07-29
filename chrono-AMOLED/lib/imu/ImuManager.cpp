@@ -70,6 +70,17 @@ bool initImu() {
   }
   if (!imuOk) return false;
 
+  // CTRL1 bit6 (0x40) = auto-incrementation d'adresse -- SANS ce bit, le
+  // capteur ne fait pas avancer son pointeur de registre entre les
+  // octets d'une meme lecture I2C : une lecture de 6 octets a partir de
+  // ACCEL_XL renvoie alors 3 fois le meme mot au lieu de AX/AY/AZ
+  // distincts (constate au 1er test reel : X, Y, Z toujours identiques
+  // entre eux, meme chose cote gyro -- signature exacte de ce bit
+  // manquant). Petit-boutiste (bit5=0) puisque rawWordLE() lit les
+  // octets en little-endian.
+  uint8_t ctrl1 = 0x40;
+  I2C_write_buff(imuAddr, QMI8658_REG_CTRL1, &ctrl1, 1);
+
   uint8_t ctrl2 = QMI8658_CTRL2_ACC_8G | QMI8658_CTRL2_ODR_1000HZ;
   uint8_t ctrl3 = QMI8658_CTRL3_GYRO_512DPS | QMI8658_CTRL3_ODR_1000HZ;
   uint8_t ctrl7 = 0x03; // aEN (bit0) + gEN (bit1)
@@ -104,15 +115,27 @@ void imuTick() {
   lastAccelXmg = ax; lastAccelYmg = ay; lastAccelZmg = az;
   lastGyroXdps = gx; lastGyroYdps = gy; lastGyroZdps = gz;
 
-  // ----- Mapping d'axe A CONFIRMER une fois monte dans le carenage -----
-  // Hypothese de travail (a verifier physiquement, cf. commentaire en
-  // tete de ImuManager.h) : le roulis (roll) se lit sur le gyro X et
-  // se recale sur l'angle atan2(accelY, accelZ). Si le montage final
-  // donne un axe different, ajuster gyroRollDps/accelRollDeg
-  // ci-dessous -- rien d'autre a changer, le reste du fichier est
-  // independant du mapping physique.
-  float gyroRollDps = gx;
-  float accelRollDeg = atan2f(ay, az) * 180.0f / (float)M_PI;
+  // ----- Mapping d'axe confirme par test reel (carte penchee a gauche/droite) -----
+  // Teste le 29/07 : a plat, X porte la gravite (~1040mg), Y et Z quasi
+  // nuls. Penchee a gauche, Y descend vers -430mg (X diminue un peu,
+  // Z reste petit) ; penchee a droite, Y monte vers +570mg. Magnitude
+  // totale ~1g dans les 3 cas -- le roulis fait donc tourner le
+  // vecteur gravite dans le plan X-Y, d'ou roll = atan2(accelY, accelX).
+  //
+  // Cote gyro : une rotation qui fait tourner un vecteur DANS le plan
+  // X-Y se fait physiquement AUTOUR de l'axe Z (regle de la main
+  // droite) -- gyroZ porte donc le roulis, pas gyroY (corrige le
+  // 29/07 -- gyroY avait ete suppose par erreur, en misant sur "meme
+  // lettre d'axe" plutot que sur la geometrie reelle de la rotation).
+  // Par la meme logique : gyroY = tangage (rotation dans le plan X-Z,
+  // pertinent pour wheelie/stoppie, cf. checkWheelieStoppie() dans
+  // main.cpp) et gyroX = lacet (rotation dans le plan Y-Z, autour de
+  // l'axe "vertical au repos"). Mapping tangage/lacet deduit par
+  // symetrie geometrique, pas encore teste physiquement (contrairement
+  // au roulis) -- un wheelie/stoppie ne se simule pas a la main sur un
+  // etabli comme le roulis, seul un vrai roulage le confirmera.
+  float gyroRollDps = gz;
+  float accelRollDeg = atan2f(ay, ax) * 180.0f / (float)M_PI;
 
   leanAngleDeg = COMPLEMENTARY_ALPHA * (leanAngleDeg + gyroRollDps * dtS)
                + (1.0f - COMPLEMENTARY_ALPHA) * accelRollDeg;

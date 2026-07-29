@@ -19,16 +19,17 @@
 // physique, cf. son commentaire d'en-tete). initImu() DOIT donc etre
 // appelee apres I2C_master_Init(), comme Touch_Init().
 //
-// IMPORTANT -- axe roll et registres a valider a l'oscillo/Serial une
-// fois monte dans le carenage definitif, exactement comme au bring-up
-// (carte a plat -> ~1g sur un seul axe accelero, gyro quasi nul ;
-// carte penchee comme un angle moto -> notez quel axe bouge). Le
-// mapping de registres (WHO_AM_I/CTRL/donnees) vient de la datasheet
-// publique QMI8658C (Waveshare/QST) et de plusieurs implementations
-// open-source croisees, mais n'a pas ete verifie sur CE board precis --
-// premiere mise en route a faire avec le Serial ouvert (WHO_AM_I doit
-// valoir 0x05, valeurs au repos coherentes) avant de faire confiance
-// aux logs.
+// STATUT (29/07) -- registres valides sur le vrai board : WHO_AM_I
+// repond 0x05, magnitude accelero ~1g stable dans toutes les
+// orientations testees (fix CTRL1 auto-increment necessaire, cf. son
+// commentaire dans le .cpp). Axe roll confirme par test reel (carte
+// penchee a gauche/droite) : Y est l'axe qui bascule avec le roulis,
+// X est l'axe "vertical au repos" -- roll = atan2(accelY, accelX), pas
+// atan2(accelY, accelZ) comme suppose au depart. Gyro Y suppose porter
+// le meme axe physique (pas encore verifie en dynamique, cf.
+// commentaire dedie dans le .cpp) -- impact limite de toute facon, le
+// filtre complementaire ne lui donne que 2% de poids face a
+// l'accelerometre.
 
 // Initialise le capteur sur le bus I2C partage (deja monte par
 // I2C_master_Init() -- meme bus que le tactile FT3168). Retourne false

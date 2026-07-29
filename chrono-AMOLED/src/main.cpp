@@ -652,6 +652,71 @@ static char currentLogPath[40] = "";
 static char currentSessionCompactKey[16] = "";
 static bool recordingEnabled = false;
 static float currentLapMaxSpeedKmh = 0.0f; // remise a 0 a chaque tour termine (checkLapCompletion)
+
+// ----- Detection wheelie/stoppie (roue avant/arriere levee) -----
+//
+// Pas de calcul d'angle de tangage continu ici (contrairement au
+// roulis, cf. ImuManager) : sous forte acceleration/freinage,
+// l'accelerometre confond acceleration lineaire et gravite bien plus
+// violemment qu'en virage -- un angle calcule serait denue de sens
+// pendant exactement les evenements qu'on veut detecter. Approche plus
+// robuste et standard en telemetrie moto : detection par SEUIL sur la
+// vitesse de tangage brute (gyro Y, cf. mapping d'axe dans
+// ImuManager.cpp -- roulis=gyroZ, tangage=gyroY, lacet=gyroX), avec
+// hysteresis pour ne compter qu'UNE fois un evenement soutenu (pas a
+// chaque tick pendant qu'il dure).
+//
+// ATTENTION -- seuil/duree NON valides sur piste (contrairement au
+// roulis, testable a la main sur un etabli, un wheelie/stoppie ne se
+// simule pas vraiment hors roulage reel -- il faut la dynamique
+// acceleration+levee de roue). Valeurs de depart a affiner apres un
+// premier roulage selon les faux positifs/negatifs constates
+// (vibrations moteur/route vs vrai levage de roue). Sens confirme par
+// test reel le 29/07 (mouvement de bascule capture en cours de geste,
+// pas a l'arret) : gyroY negatif = roue avant qui se leve (wheelie,
+// -110.75 dps observe), gyroY positif = roue arriere qui se leve
+// (stoppie, +390.53 dps observe).
+static const float WHEELIE_GYRO_THRESHOLD_DPS = 45.0f;      // a affiner sur piste
+static const unsigned long WHEELIE_MIN_DURATION_MS = 250UL; // filtre les a-coups/vibrations, pas un vrai levage
+static unsigned long wheelieStartMs = 0, stoppieStartMs = 0;
+static bool wheelieCounted = false, stoppieCounted = false;
+static int currentLapWheelieCount = 0, currentLapStoppieCount = 0;
+
+static void checkWheelieStoppie() {
+  if (!recordingEnabled || !imuOk) return;
+  float ax, ay, az, gx, gy, gz;
+  getImuRaw(ax, ay, az, gx, gy, gz);
+  unsigned long nowMs = millis();
+
+  // Sens confirme par test reel (29/07, mouvement captures en cours de
+  // bascule -- pas a l'arret) : roue avant qui se leve (wheelie) ->
+  // gyroY negatif (-110.75 dps observe) ; roue arriere qui se leve
+  // (stoppie) -> gyroY positif (+390.53 dps observe). Inverse de
+  // l'hypothese de depart, corrige ici.
+  if (gy < -WHEELIE_GYRO_THRESHOLD_DPS) {
+    if (wheelieStartMs == 0) wheelieStartMs = nowMs;
+    if (!wheelieCounted && nowMs - wheelieStartMs >= WHEELIE_MIN_DURATION_MS) {
+      currentLapWheelieCount++;
+      wheelieCounted = true;
+      Serial.println("Wheelie detecte (estime -- seuil/duree encore a affiner sur piste)");
+    }
+  } else {
+    wheelieStartMs = 0;
+    wheelieCounted = false;
+  }
+
+  if (gy > WHEELIE_GYRO_THRESHOLD_DPS) {
+    if (stoppieStartMs == 0) stoppieStartMs = nowMs;
+    if (!stoppieCounted && nowMs - stoppieStartMs >= WHEELIE_MIN_DURATION_MS) {
+      currentLapStoppieCount++;
+      stoppieCounted = true;
+      Serial.println("Stoppie detecte (estime -- seuil/duree encore a affiner sur piste)");
+    }
+  } else {
+    stoppieStartMs = 0;
+    stoppieCounted = false;
+  }
+}
 static float currentLapMinSpeedKmh = -1.0f;   // -1 = pas encore de mesure sur ce tour
 static double currentLapSpeedSumKmh = 0.0;    // pour la moyenne -- somme/echantillons
 static unsigned long currentLapSpeedSamples = 0;
@@ -694,6 +759,10 @@ static void startRecording() {
   currentLapSpeedSamples = 0;
   currentLapDistanceM = 0.0;
   currentLapHasPrevPoint = false;
+  currentLapWheelieCount = 0;
+  currentLapStoppieCount = 0;
+  wheelieStartMs = 0; stoppieStartMs = 0;
+  wheelieCounted = false; stoppieCounted = false;
   lastLapMsSeen = 0xFFFFFFFFUL; // force la capture du depart des le tout 1er point de la session
   strncpy(currentLapStartTimeStr, "--:--:--", sizeof(currentLapStartTimeStr));
   appendSessionLine(String("# session demarree ") + currentSessionCompactKey);
@@ -752,6 +821,10 @@ static void logGpsRow() {
     currentLapSpeedSamples = 0;
     currentLapDistanceM = 0.0;
     currentLapHasPrevPoint = false;
+    currentLapWheelieCount = 0;
+    currentLapStoppieCount = 0;
+    wheelieStartMs = 0; stoppieStartMs = 0;
+    wheelieCounted = false; stoppieCounted = false;
     strncpy(currentLapStartTimeStr, timeBuf, sizeof(currentLapStartTimeStr));
   }
   lastLapMsSeen = currentLapMs;
@@ -800,19 +873,23 @@ static void checkLapCompletion() {
   float minSpeedKmh = (currentLapMinSpeedKmh < 0) ? 0.0f : currentLapMinSpeedKmh;
   float distanceKm = (float)(currentLapDistanceM / 1000.0);
 
-  // 11 champs desormais (etait 6, puis 7 avec Vmax) -- toujours ajoutes
-  // EN FIN de ligne, jamais en milieu : les lecteurs existants (page
-  // /lap, ecran physique) qui ne lisent que les 6-7 premiers champs
-  // continuent de fonctionner sans modification sur les anciennes ET
-  // les nouvelles sessions (retrocompatibilite, meme principe que pour
-  // Vmax cf. README).
-  char line[192];
-  snprintf(line, sizeof(line), "%s,%s,%d,%s,%s,%s,%.0f,%.0f,%.0f,%.2f,%s",
+  // 13 champs desormais (etait 6, puis 7 avec Vmax, puis 11 avec
+  // Vmin/Vmoy/distance/depart) -- toujours ajoutes EN FIN de ligne,
+  // jamais en milieu : les lecteurs existants (page /lap, ecran
+  // physique) qui ne lisent que les premiers champs continuent de
+  // fonctionner sans modification sur les anciennes ET les nouvelles
+  // sessions (retrocompatibilite, meme principe que pour Vmax cf.
+  // README). Compteurs wheelie/stoppie estimes par seuil sur le gyro
+  // (cf. checkWheelieStoppie()) -- 0 si l'IMU n'a pas ete detectee.
+  char line[224];
+  snprintf(line, sizeof(line), "%s,%s,%d,%s,%s,%s,%.0f,%.0f,%.0f,%.2f,%s,%d,%d",
            dateBuf, timeBuf, lapsCount, lapBuf, bestBuf, getActiveCourseNameForDisplay(),
-           currentLapMaxSpeedKmh, minSpeedKmh, avgSpeedKmh, distanceKm, currentLapStartTimeStr);
+           currentLapMaxSpeedKmh, minSpeedKmh, avgSpeedKmh, distanceKm, currentLapStartTimeStr,
+           currentLapWheelieCount, currentLapStoppieCount);
   appendSessionLine(line);
-  Serial.printf("Tour %d enregistre : %s (meilleur : %s, Vmax %.0f, Vmin %.0f, Vmoy %.0f km/h, %.2f km, depart %s)\n",
-                lapsCount, lapBuf, bestBuf, currentLapMaxSpeedKmh, minSpeedKmh, avgSpeedKmh, distanceKm, currentLapStartTimeStr);
+  Serial.printf("Tour %d enregistre : %s (meilleur : %s, Vmax %.0f, Vmin %.0f, Vmoy %.0f km/h, %.2f km, depart %s, %d wheelie(s), %d stoppie(s))\n",
+                lapsCount, lapBuf, bestBuf, currentLapMaxSpeedKmh, minSpeedKmh, avgSpeedKmh, distanceKm, currentLapStartTimeStr,
+                currentLapWheelieCount, currentLapStoppieCount);
 
   // Reinitialisation pour le tour suivant -- filet de securite : en
   // temps normal, logGpsRow() se reinitialise deja tout seul sur la
@@ -825,6 +902,10 @@ static void checkLapCompletion() {
   currentLapDistanceM = 0.0;
   currentLapHasPrevPoint = false;
   strncpy(currentLapStartTimeStr, "--:--:--", sizeof(currentLapStartTimeStr));
+  currentLapWheelieCount = 0;
+  currentLapStoppieCount = 0;
+  wheelieStartMs = 0; stoppieStartMs = 0;
+  wheelieCounted = false; stoppieCounted = false;
 }
 
 // ===================== WebServerManager (WiFi/telechargement) =====================
@@ -924,6 +1005,8 @@ static void printSerialCommandsHelp() {
   Serial.println("  c : efface tous les logs GPS detailles");
   Serial.println("  x : efface le carnet de sessions (/sessions.csv)");
   Serial.println("  b : tension/pourcentage batterie");
+  Serial.println("  i : angle d'inclinaison + valeurs brutes IMU (accelero/gyro)");
+  Serial.println("  w : flux gyroY en continu 3s -- pour identifier le signe exact d'un wheelie/stoppie");
   Serial.println("  ? ou h : reaffiche cette aide");
 }
 
@@ -985,6 +1068,38 @@ static void handleSerialCommands() {
       Serial.println("Carnet de session deja absent ou erreur d'effacement.");
     }
     lastLapCount = 0;
+
+  } else if (c == 'i') {
+    float ax, ay, az, gx, gy, gz;
+    getImuRaw(ax, ay, az, gx, gy, gz);
+    Serial.printf("IMU : %s -- angle roulis %.1f deg\n", imuOk ? "OK" : "absente/en panne", getLeanAngleDeg());
+    Serial.printf("  Accel (mg) : X=%.1f Y=%.1f Z=%.1f\n", ax, ay, az);
+    Serial.printf("  Gyro (dps) : X=%.2f Y=%.2f Z=%.2f\n", gx, gy, gz);
+    if (imuOk) Serial.println("  -- carte a plat : ~1000mg sur un seul axe accelero, gyro proche de 0 attendus au repos.");
+
+  } else if (c == 'w') {
+    // Flux continu au lieu d'un instantane -- une lecture ponctuelle
+    // ('i') tape a la main ne peut pas viser precisement le pic d'un
+    // mouvement rapide comme un wheelie/stoppie (constate le 29/07 :
+    // deux tests donnent des signes opposes selon l'instant exact de la
+    // capture -- montee du mouvement vs rebond/oscillation qui suit).
+    // Ici, on imprime gyroY en continu pendant 2s pour voir toute la
+    // courbe et identifier le signe du VRAI pic sans ambiguite de
+    // timing.
+    if (!imuOk) {
+      Serial.println("IMU absente/en panne -- rien a tester.");
+    } else {
+      Serial.println("Bascule la carte maintenant (wheelie ou stoppie) -- flux 3s :");
+      unsigned long startMs = millis();
+      while (millis() - startMs < 3000) {
+        imuTick(); // sinon getImuRaw() renverrait les valeurs figees d'avant la boucle (loop() est bloque ici)
+        float ax, ay, az, gx, gy, gz;
+        getImuRaw(ax, ay, az, gx, gy, gz);
+        Serial.printf("  t+%4lums  gyroY=%7.1f dps  (accelZ=%6.1f mg)\n", millis() - startMs, gy, az);
+        delay(15); // imuTick() se limite deja a ~50Hz (20ms) en interne
+      }
+      Serial.println("Fin du flux -- note le signe au moment ou |gyroY| est maximal (c'est le vrai pic du mouvement).");
+    }
 
   } else if (c == '?' || c == 'h') {
     printSerialCommandsHelp();
@@ -1982,6 +2097,7 @@ void loop() {
   webServerManager.loop();
   handleSerialCommands();
   imuTick(); // inconditionnel (meme hors REC) -- garde le filtre d'angle "chaud"
+  checkWheelieStoppie(); // no-op si REC off ou IMU absente
 
   if (newGpsData) {
     newGpsData = false;
