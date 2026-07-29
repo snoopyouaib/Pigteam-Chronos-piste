@@ -129,6 +129,7 @@ Petite série de retouches suite à la calibration sur le banc
   nettement plus petit que sa contrepartie).
 - **Vitesse max/min/moy, distance et heure de depart par tour** : `logGpsRow()` accumule desormais ces 5 valeurs a chaque trame GPS pendant l'enregistrement (vitesse mini/maxi/moyenne, distance cumulee par haversine, heure de la 1ere trame du tour), et `checkLapCompletion()` les ecrit en fin de ligne dans `/sessions.csv` (11 champs au total, contre 6 a l'origine puis 7 avec le seul Vmax) avant de tout reinitialiser pour le tour suivant. Affiche sur l'ecran physique (`Tour 3 : 1:23.456  (best)  Vmax 87`) ET sur la page web `/lap`, qui lit ces 5 colonnes directement depuis le carnet -- plus de calcul ni de requete au log GPS detaille a l'affichage. Retrocompatible pour la lecture : les anciennes sessions a 6/7 champs continuent de s'afficher sans planter (juste "--" pour ces 5 colonnes sur la page web -- l'ancien repli par fetch+parsing JS du log detaille a ete retire entierement pour alleger la page, plus aucun `<script>` sur `/lap`).
 - **Correction "attente au paddock" comptee dans le tour 1** (28/07, valide sur log reel) : `current_lap_ms` peut rester bloque a 0 plusieurs secondes (observe : 27s) le temps que le geofence s'arme, avant le vrai depart du 1er tour -- ce temps d'attente immobile/lent etait a tort inclus dans la distance et l'heure de depart du tour 1 (Vmax/Vmin/Vavg non affectes, la vitesse pendant l'attente restant dans une plage coherente par coincidence). Fix dans `logGpsRow()` : tant qu'aucun tour n'est encore valide (`lapsCount == 0`) ET que `current_lap_ms` ne progresse pas d'une trame a l'autre, les accumulateurs (distance/vitesses/depart) sont glisses en avant plutot que de compter ce temps mort. **Piege evite en cours de route** : une 1ere version comparait `current_lap_ms` sans cette garde `lapsCount == 0` -- elle se redeclenchait a CHAQUE transition entre tours (le compteur du tour suivant peut deja apparaitre dans `getDisplayState()` avant que `checkLapCompletion()` ait pu lire les stats du tour qui vient de se terminer, confirme sur log reel : le tour 2 demarre direct a 1182ms sans jamais repasser par 0), ce qui aurait efface les stats de TOUS les tours suivants au lieu de corriger juste le 1er -- attrape uniquement grace a une simulation Python du log reel avant tout flash, pas en theorie.
+- **Regression corrigee le lendemain (29/07)** : la version ci-dessus limitait la CAPTURE du depart au seul cas `lapsCount == 0` (plateau), en supprimant au passage l'ancienne capture generale -- consequence : le depart du tour 1 restait bon, mais celui des tours 2, 3... restait bloque sur le placeholder `--:--:--` (confirme sur un test terrain reel de 2 tours le 29/07, `sessions.csv` a l'appui). Fix : capture generale du depart retablie (`if (currentLapSpeedSamples == 0) ...`, fire sur la 1ere trame accumulee apres N'IMPORTE quel reset, y compris celui de fin de `checkLapCompletion()`), EN PLUS de la logique de plateau specifique au tour 1 -- les deux mecanismes cohabitent sans se marcher dessus. Revalide par simulation Python sur le log reel du 29/07 : tour 1 retombe pile sur les valeurs deja enregistrees (07:28:53, 0.86 km, 53/26/43), tour 2 obtient enfin un depart coherent (07:30:07).
 - **Hints de navigation supprimés** : les petits messages en haut à
   droite de chaque écran de l'anneau (Circuit, Connexion, Sessions,
   Réglages, WiFi, Nouveau circuit -- ex. "Tap: choisir BACK: statut")
@@ -136,6 +137,132 @@ Petite série de retouches suite à la calibration sur le banc
   inutile. Le "PRESS REC" clignotant en bas à droite de l'écran Statut
   est conservé (ce n'est pas un hint de navigation mais l'invite
   fonctionnelle qui indique quand appuyer sur REC).
+
+## IMU (QMI8658) -- angle d'inclinaison en virage, log seul (29/07)
+
+Le board 1.91 a un accelerometre+gyroscope 6 axes (QMI8658) deja
+partage sur le meme bus I2C que le tactile FT3168 -- valide au
+bring-up (`README_AMOLED_bringup.md`, etape "02_I2C_QMI8658") mais
+jamais integre au firmware jusqu'ici. Ajout demande : **angle
+d'inclinaison en virage (lean angle), journalise uniquement -- aucun
+affichage ecran** (pas le temps de regarder un ecran en pleine
+inclinaison).
+
+- **Pas de lib Arduino/Wire** : une lib QMI8658 classique
+  (`Wire`/`TwoWire`) ferait son propre `i2c_driver_install()` sur le
+  meme port I2C_NUM_0 deja pris par `I2C_master_Init()` (driver ESP-IDF
+  natif) -- exactement le conflit que `touch_bsp.c` evite deja pour le
+  FT3168 (meme bus physique). Nouveau module `lib/imu/ImuManager.*`
+  ecrit en registres bas niveau via `I2C_write_buff`/`I2C_read_buff`
+  (memes fonctions partagees que le tactile), pas de dependance
+  externe ajoutee a `platformio.ini`.
+- **Angle par filtre complementaire** (98% integration gyro / 2%
+  recalage accelerometre) plutot qu'un simple `atan2(accel)` : sous
+  acceleration laterale en virage, l'accelerometre seul confond
+  gravite et force centripete et donnerait un angle faux. Le gyro
+  integre est precis a court terme mais derive lentement -- le
+  melange des deux reste correct dans la duree sans etre perturbe par
+  un virage de quelques secondes.
+- **7 champs ajoutes en fin de ligne** de `log_*.csv`
+  (`lean_angle_deg,accel_x_mg,accel_y_mg,accel_z_mg,gyro_x_dps,gyro_y_dps,gyro_z_dps`),
+  meme principe de retrocompatibilite que les ajouts precedents a
+  `/sessions.csv` -- les valeurs brutes sont loggees en plus de l'angle
+  calcule, pour pouvoir recalculer/corriger en post-traitement si le
+  mapping d'axe s'avere faux une fois monte definitivement.
+- **⚠️ A valider physiquement avant de faire confiance aux logs**,
+  exactement comme au bring-up d'origine : le mapping de registres
+  (WHO_AM_I/CTRL/donnees) vient de la datasheet publique QMI8658C et de
+  plusieurs implementations open-source croisees, mais n'a pas ete
+  verifie sur ce firmware precis (contrairement au reste du projet,
+  aucun test au banc n'est possible ici -- pas de vrai capteur sur le
+  banc `display_only_191`). A la premiere mise en route, verifier au
+  Serial : `WHO_AM_I` doit valoir `0x05`, et les valeurs au repos
+  (carte immobile) doivent se stabiliser comme au bring-up (~1g sur un
+  seul axe accelero, gyro quasi nul). **L'axe qui correspond au roulis
+  une fois monte dans le carenage reste aussi a confirmer** (hypothese
+  de travail actuelle : gyro X + `atan2(accelY, accelZ)`, a ajuster
+  dans `ImuManager.cpp` si le montage final donne un axe different --
+  cf. commentaire dedie dans le fichier).
+
+## Wheelie / stoppie -- detection par seuil, log seul (29/07)
+
+Suite logique de l'IMU : detecter les levages de roue (avant =
+wheelie, arriere = stoppie). **Pas de calcul d'angle de tangage continu
+ici**, contrairement au roulis -- sous forte acceleration/freinage,
+l'accelerometre confond acceleration lineaire et gravite bien plus
+violemment qu'en virage, un angle calcule serait denue de sens pendant
+exactement les evenements qu'on veut detecter. Approche plus robuste et
+standard en telemetrie moto : **detection par seuil sur la vitesse de
+tangage brute** (gyro Y, cf. mapping d'axe ci-dessous), avec hysteresis
+pour ne compter qu'une fois un evenement soutenu.
+
+- **Mapping d'axe complet** (deduit par symetrie geometrique a partir du
+  test roulis validé sur le vrai board) : roulis = gyroZ (corrige le
+  29/07 -- gyroY avait ete suppose par erreur au depart), tangage =
+  gyroY, lacet = gyroX. Seul le roulis a ete teste physiquement (carte
+  penchee a gauche/droite sur l'etabli) -- tangage/lacet n'ont pas pu
+  l'etre de la meme facon, un wheelie/stoppie ne se simule pas a la
+  main.
+- **2 champs ajoutes en fin de ligne** de `/sessions.csv`
+  (`wheelie_count`, `stoppie_count` -- 13 champs desormais), meme
+  principe de retrocompatibilite que les ajouts precedents.
+- **⚠️ Seuil/durée NON validés sur piste** : `WHEELIE_GYRO_THRESHOLD_DPS`
+  (45°/s) et `WHEELIE_MIN_DURATION_MS` (250ms) sont des valeurs de
+  depart a affiner apres un premier roulage reel selon les faux
+  positifs/negatifs constates (vibrations moteur/route vs vrai levage
+  de roue). Le **sens est confirme et fiable** : une premiere
+  validation par instantanes ponctuels (commande Serial `i`) avait
+  donne des signes contradictoires d'un essai a l'autre (impossible de
+  viser a la main le pic exact d'un mouvement aussi rapide) -- resolu
+  par l'ajout d'une commande `w` qui imprime gyroY en flux continu
+  pendant 3s pendant le geste. Le flux complet confirme sans ambiguite :
+  gyroY negatif = roue avant qui se leve (wheelie, pic a -203°/s
+  observe), gyroY positif = roue arriere qui se leve (stoppie, pic a
+  +292°/s observe), les deux mouvements et leurs transitions bien
+  visibles dans une seule capture continue.
+- **Angle max a droite/a gauche par tour ajoute** (meme jour) : suite
+  logique du roulis deja logge point par point -- `logGpsRow()`
+  maintient desormais `currentLapMaxAngleRightDeg` (max simple) et
+  `currentLapMaxAngleLeftDeg` (min simple, le plus negatif) a chaque
+  trame, ecrits par `checkLapCompletion()` comme 2 champs
+  supplementaires en fin de ligne de `/sessions.csv` (`%.0f,%.0f` en
+  valeur absolue -- 15 champs desormais). Affiche sur la page web
+  `/lap` (colonnes "Angle D"/"Angle G", `--` si absent sur une session
+  plus ancienne). Toujours pas d'affichage ecran physique (meme
+  principe que l'angle en continu : pas le temps de regarder un ecran
+  en pleine inclinaison).
+
+## Nouveautés du 29/07
+
+- **Écran Connexion enrichi** : en plus de GPS et Circuit, affiche
+  désormais le **stockage** (`SD OK  x.x/y.y GB` en blanc, ou
+  `SD --  repli LittleFS` en orange si la carte est absente/en panne --
+  via `gpsLogsOnSd`/`sdUsedBytes()`/`sdTotalBytes()`, déjà exposés par
+  `SdLogStorage.h`) et la **batterie** (`Batt XX%  (Y.YYV)`, rouge si
+  ≤15%) -- un coup d'œil suffit pour vérifier que tous les modules
+  répondent avant de partir rouler.
+- **Sécurité batterie faible ("NO BAT")** : sous 5%
+  (`LOW_BATT_NO_REC_PERCENT`), le "PRESS REC" clignotant de l'écran
+  Statut devient "NO BAT" et PUSH ne démarre plus d'enregistrement --
+  évite de couper l'alimentation en plein tour (perte du log en cours)
+  et d'user une batterie déjà quasi vide. Ne bloque que le
+  **démarrage** : un enregistrement déjà en cours n'est pas interrompu,
+  et la reprise depuis l'écran "Enregistrement en pause" n'est pas
+  (encore) protégée par ce même seuil -- l'utilité réelle de cet écran
+  de pause/reprise est encore en réflexion, pas la peine d'y ajouter la
+  garde tant que ce n'est pas tranché.
+- **Chrono figé au passage de ligne, désormais réglable ("Pause
+  chrono")** : au lieu de repartir instantanément à 0 après un tour, le
+  gros chrono reste affiché sur le temps du tour qui vient de se
+  terminer pendant `lapFreezeS` secondes (`checkLapCompletion()` arme
+  `lapFreezeUntilMs` à chaque tour -- un tour plus rapide que ce délai
+  écourte naturellement le gel précédent au profit du nouveau temps).
+  N'affecte que l'affichage, rien n'est retardé côté
+  enregistrement/logs. Réglable depuis l'écran **Réglages** -- une
+  nouvelle ligne "Pause chrono" sous "WiFi téléchargement", un tap
+  cycle parmi 0 (désactivé) / 5 / 10 / 15 / 20 / 30s -- persisté sur
+  LittleFS (`/settings.csv`) pour survivre à un redémarrage, 10s par
+  défaut si le fichier est absent/corrompu.
 
 ## Pièges de compilation rencontrés
 

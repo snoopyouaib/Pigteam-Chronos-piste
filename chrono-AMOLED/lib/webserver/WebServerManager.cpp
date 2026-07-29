@@ -1142,6 +1142,8 @@ static void handleLapTracePage() {
   html += "<th style='padding:4px 8px'>Tour</th><th style='padding:4px 8px'>Temps</th><th style='padding:4px 8px'>Diff</th>";
   html += "<th style='padding:4px 8px'>Depart tour</th><th style='padding:4px 8px'>Distance</th>";
   html += "<th style='padding:4px 8px'>V.max</th><th style='padding:4px 8px'>V.min</th><th style='padding:4px 8px'>V.moy</th>";
+  html += "<th style='padding:4px 8px'>Wheelie</th><th style='padding:4px 8px'>Stoppie</th>";
+  html += "<th style='padding:4px 8px'>Angle D</th><th style='padding:4px 8px'>Angle G</th>";
   html += "<th style='padding:4px 8px'>Circuit</th></tr>";
   httpServer.sendContent(html);
   html = "";
@@ -1163,9 +1165,9 @@ static void handleLapTracePage() {
       if (line.startsWith("# session arretee")) { inTarget = false; continue; }
       if (!inTarget) continue;
 
-      String fld[11];
+      String fld[15];
       int idx = 0, start = 0;
-      for (int i = 0; i < (int)line.length() && idx < 11; i++) {
+      for (int i = 0; i < (int)line.length() && idx < 15; i++) {
         if (line[i] == ',' || i == (int)line.length() - 1) {
           int end = (line[i] == ',') ? i : i + 1;
           fld[idx++] = line.substring(start, end);
@@ -1181,7 +1183,9 @@ static void handleLapTracePage() {
         if (isBest) diffText = "0.000";
         else if (ms >= 0 && bestMs >= 0) diffText = "+" + String((ms - bestMs) / 1000.0f, 3);
 
-        bool hasExtended = (idx >= 11); // nouveau format (vmax/vmin/vavg/distance/depart deja dans le carnet)
+        bool hasExtended = (idx >= 11); // vmax/vmin/vavg/distance/depart
+        bool hasWheelie = (idx >= 13);  // + compteurs wheelie/stoppie
+        bool hasAngles = (idx >= 15);   // + angle max droite/gauche
 
         String row = isBest ? "<tr style='background:#1d3a5c'>" : "<tr>";
         row += "<td style='padding:4px 8px'>" + n + "</td>";
@@ -1204,6 +1208,10 @@ static void handleLapTracePage() {
           row += "<td style='padding:4px 8px'>--</td>";
           row += "<td style='padding:4px 8px'>--</td>";
         }
+        row += "<td style='padding:4px 8px'>" + (hasWheelie ? fld[11] : "--") + "</td>";
+        row += "<td style='padding:4px 8px'>" + (hasWheelie ? fld[12] : "--") + "</td>";
+        row += "<td style='padding:4px 8px'>" + (hasAngles && fld[13].length() ? fld[13] + "&deg;" : "--") + "</td>";
+        row += "<td style='padding:4px 8px'>" + (hasAngles && fld[14].length() ? fld[14] + "&deg;" : "--") + "</td>";
         row += "<td style='padding:4px 8px'>" + fld[5] + "</td></tr>";
         httpServer.sendContent(row); // une ligne a la fois -- jamais accumulee
       }
@@ -1263,7 +1271,7 @@ static void handleStatusPage() {
 //
 // Meme en-tete que celui ecrit par initSessionLog() cote main.cpp --
 // a garder synchronise si ce format venait a changer un jour.
-static const char* SESSIONS_CSV_HEADER = "date,local_time,lap_number,lap_time,best_lap_time,circuit,vmax_kmh,vmin_kmh,vavg_kmh,distance_km,heure_depart";
+static const char* SESSIONS_CSV_HEADER = "date,local_time,lap_number,lap_time,best_lap_time,circuit,vmax_kmh,vmin_kmh,vavg_kmh,distance_km,heure_depart,wheelie_count,stoppie_count,angle_droit_max_deg,angle_gauche_max_deg";
 
 static void handleDebugPage() {
   String html = pageHeader("firmware");

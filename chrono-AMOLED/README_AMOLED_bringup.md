@@ -541,3 +541,27 @@ automatique entre les deux). Cf. `chrono-AMOLED/README.md`, section
   l'écran de pause raccourci, vitesse max par tour, hints de
   navigation retirés) -- détail dans `chrono-AMOLED/README.md`, section
   "Ajustements d'affichage".
+- **`display_only_191/` enfin versionné sur GitHub (29/07)** : jusque
+  là, seul `chrono-AMOLED/` était commité -- le banc n'existait que
+  localement chez chacun (moi et l'assistant), reconstruit à chaque
+  fois à partir des zips échangés. Plusieurs allers-retours ont fini
+  par écraser des retouches non commitées (hints de navigation
+  revenus, sécurité batterie perdue...) à chaque resynchronisation avec
+  `chrono-AMOLED/`. Poussé sur le repo pour de bon désormais -- un
+  `git pull` suffit pour repartir de l'état exact, plus de perte de
+  travail entre les sessions.
+- **Cycle de démo simulé revu (29/07)** : la détection de circuit ne
+  passe plus par l'écran Circuit mais par un **premier PUSH** depuis
+  l'écran Statut (recherche -> détecté), suivi d'un **second PUSH** qui
+  démarre le REC -- avec quelques secondes de "roulage paddock" simulé
+  (chrono affiche la vitesse, pas encore le temps de tour) avant le
+  vrai départ, comme au réel quand la ligne n'est pas encore franchie.
+  Un **troisième PUSH** ouvre "Enregistrement en pause"
+  (continuer/arrêter) ; "arrêter" revient au point de départ (mode
+  recherche). Reproduit fidèlement le cycle complet du réel sans GPS
+  branché.
+- **Écran Réglages enrichi (29/07)** : nouvelle ligne "Pause chrono"
+  (cycle 0/5/10/15/20/30s par tap) sous "WiFi téléchargement", reportée
+  du réel -- cf. `chrono-AMOLED/README.md`, section "Nouveautés du
+  29/07", pour le détail (sur le banc, pas de persistance LittleFS,
+  valeur RAM seule qui revient à 10s par défaut au reboot).

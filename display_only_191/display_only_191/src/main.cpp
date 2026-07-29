@@ -141,16 +141,14 @@ static SimTrackList myTracks = {
 };
 
 // true une fois qu'un circuit est "detecte" (choisi sur l'ecran Circuit,
-// Auto ou manuel) -- equivalent banc de detectionEffectivelyComplete()
-// reel (geofencing+GPS). Redevient false apres un arret definitif
-// confirme (SCR_CONFIRM_STOP -> BACK -> activateAutoMode(), cf. plus
-// bas, exactement comme le reset courseManager reel) ou pendant une
-// capture de nouveau circuit armee.
-// Detecte "PigTeam_track" par defaut au demarrage (contrairement au
-// reel, qui demarre toujours non-detecte en attendant un fix GPS) --
-// confort banc : PUSH fonctionne des l'ecran Statut sans devoir
-// d'abord passer par l'ecran Circuit pour choisir un circuit.
-static bool simDetected = true;
+// Auto ou manuel, OU 1er PUSH sur Statut -- cf. handlePush()) --
+// equivalent banc de detectionEffectivelyComplete() reel (geofencing+
+// GPS). Redevient false apres un arret definitif confirme
+// (SCR_CONFIRM_STOP -> BACK -> activateAutoMode(), cf. plus bas,
+// exactement comme le reset courseManager reel) ou pendant une capture
+// de nouveau circuit armee. Demarre a false -- la simulation reproduit
+// le cycle complet recherche->detecte->REC comme au reel.
+static bool simDetected = false;
 
 static bool newCircuitCaptureArmed = false;
 static bool newCircuitAutoSaved = false;
@@ -220,8 +218,29 @@ static int simLapsCount = 0;
 static unsigned long simCurrentLapTargetMs = 20000;
 static unsigned long randomLapDurationMs() { return (unsigned long)random(8000, 30000); } // [8s, 30s[
 
+// Simule quelques secondes de roulage dans le paddock avant le vrai
+// depart (passage de ligne) -- au reel, currentLapMs reste a 0 tant que
+// getRaceStarted() n'est pas true cote CourseManager/DovesLapTimer
+// (ligne pas franchie), et l'ecran affiche la vitesse a la place du
+// chrono pendant ce temps (cf. updateStatusScreen()). Ici, on decale le
+// "vrai" depart de simLapStartMs dans le futur au lieu de le poser
+// immediatement a millis() : getDisplayState()/checkLapCompletion()
+// restent inchanges, ils voient juste un compteur qui n'a pas encore
+// commence.
+static const unsigned long SIM_PADDOCK_DELAY_MS = 6000UL;
+
+// Fige l'affichage du chrono sur le temps du tour qui vient de se
+// terminer pendant lapFreezeS secondes, comme au reel -- reglable
+// depuis Reglages (tap sur la ligne, cycle parmi FREEZE_PRESETS_S).
+// Contrairement au reel, pas de persistance LittleFS ici (banc
+// entierement en RAM) -- revient a 10s par defaut a chaque reboot.
+static unsigned long lapFreezeUntilMs = 0;
+static int lapFreezeS = 10;
+static const int FREEZE_PRESETS_S[] = { 0, 5, 10, 15, 20, 30 };
+static const int FREEZE_PRESETS_COUNT = 6;
+
 static void getDisplayState(unsigned long& currentLapMs, unsigned long& bestLapMs, bool& hasBest, int& lapsCount) {
-  currentLapMs = recordingEnabled ? (millis() - simLapStartMs) : 0;
+  currentLapMs = (recordingEnabled && millis() >= simLapStartMs) ? (millis() - simLapStartMs) : 0;
   hasBest = simBestLapMs != ULONG_MAX;
   bestLapMs = hasBest ? simBestLapMs : 0;
   lapsCount = simLapsCount;
@@ -231,11 +250,12 @@ static unsigned long getLastFinishedLapMs() { return simLastLapMs; }
 static void startRecording() {
   if (recordingEnabled) return;
   recordingEnabled = true;
-  simLapStartMs = millis();
+  simLapStartMs = millis() + SIM_PADDOCK_DELAY_MS; // "vrai" depart differe -- simule le roulage paddock
   simCurrentLapTargetMs = randomLapDurationMs();
   simLastLapMs = 0;
   simBestLapMs = ULONG_MAX;
   simLapsCount = 0;
+  lapFreezeUntilMs = 0;
 
   SessionSummary s;
   s.compactKey = String("SIM_") + String(millis() / 1000);
@@ -259,6 +279,7 @@ static void stopRecording() {
 // Simule la fin d'un tour a une duree aleatoire (8-29s) pendant le REC.
 static void checkLapCompletion() {
   if (!recordingEnabled) return;
+  if (millis() < simLapStartMs) return; // encore dans le paddock simule, pas encore parti
   unsigned long elapsed = millis() - simLapStartMs;
   if (elapsed < simCurrentLapTargetMs) return;
 
@@ -267,6 +288,7 @@ static void checkLapCompletion() {
   simLastLapMs = elapsed;
   if (simLastLapMs < simBestLapMs) simBestLapMs = simLastLapMs;
   simLapsCount++;
+  lapFreezeUntilMs = millis() + (unsigned long)lapFreezeS * 1000UL;
 
   if (!simSessions.empty()) {
     SessionSummary& s = simSessions.back();
@@ -284,12 +306,12 @@ static void checkLapCompletion() {
 
 // ----- Batterie simulee (cycle lent aller-retour, pas de lecture ADC) -----
 static int readBatteryPercent() {
-  const unsigned long period = 60000; // cycle complet ~60s : 100% -> 20% -> 100%
+  const unsigned long period = 60000; // cycle complet ~60s : 100% -> 0% -> 100%
   unsigned long phase = millis() % period;
   float ratio = (phase < period / 2)
     ? (1.0f - (float)phase / (period / 2))
     : ((float)(phase - period / 2) / (period / 2));
-  return 20 + (int)(ratio * 80.0f);
+  return (int)(ratio * 100.0f); // descend jusqu'a 0% -- permet de voir "NO BAT" se declencher sur le banc
 }
 
 // ----- Tick GPS simule, appele une fois par tour de loop() -----
@@ -330,6 +352,11 @@ static const unsigned long CONFIRM_STOP_INPUT_GRACE_MS = 600UL;
 static unsigned long lastDefinitiveStopMs = 0;
 static const unsigned long STATUS_REC_GRACE_AFTER_STOP_MS = 1500UL;
 static bool selectingMode = false; // true = mode "selection dans la liste" (Circuit/Session/Reglages), arme par PUSH
+
+// Batterie trop faible pour demarrer un enregistrement -- meme seuil
+// que le firmware reel. Batterie simulee ici, juste pour verifier
+// l'affichage "NO BAT" et le blocage du PUSH.
+static const int LOW_BATT_NO_REC_PERCENT = 5;
 
 static int ringIndex = 0;        // 0=Circuit,1=NouveauCircuit,2=Connexion,3=Session,4=Reglages
 static int circuitSelection = 0; // 0=Auto, 1..N=courses (plus de "Nouveau circuit" ici, ecran dedie desormais)
@@ -576,6 +603,11 @@ static void updateStatusScreen(unsigned long nowMs) {
     if (circuitDetected) {
       lv_obj_align(lblRecHint, LV_ALIGN_BOTTOM_RIGHT, -4, -4);
       lv_obj_clear_flag(lblRecHint, LV_OBJ_FLAG_HIDDEN);
+      if (battPercent <= LOW_BATT_NO_REC_PERCENT) {
+        lv_label_set_text(lblRecHint, "NO BAT");
+      } else {
+        lv_label_set_text(lblRecHint, "PRESS REC");
+      }
     } else {
       lv_obj_add_flag(lblRecHint, LV_OBJ_FLAG_HIDDEN);
     }
@@ -585,7 +617,11 @@ static void updateStatusScreen(unsigned long nowMs) {
     lv_obj_add_flag(lblTours, LV_OBJ_FLAG_HIDDEN);
 
   } else {
-    if (currentLapMs > 0) {
+    if (millis() < lapFreezeUntilMs) {
+      // Tour vient de se terminer -- affiche encore son temps fige,
+      // plutot que de reafficher direct le chrono du tour suivant.
+      formatLapTime(getLastFinishedLapMs(), buf, sizeof(buf));
+    } else if (currentLapMs > 0) {
       // Ligne franchie (getRaceStarted() true cote CourseManager/DovesLapTimer) -- chrono actif.
       formatLapTime(currentLapMs, buf, sizeof(buf));
     } else {
@@ -621,8 +657,6 @@ static void updateStatusScreen(unsigned long nowMs) {
 // listes courtes (Circuit ~5 items, Reglages 1 item) qui ont la place.
 // createListRowSmall : medium_26 -- pour les listes qui peuvent avoir
 // jusqu'a 8 lignes (Session/Tours), ou medium_34 deborderait.
-// createHint : deplace a cote du titre (etait en bas d'ecran) -- libere
-// toute la hauteur restante pour les lignes de liste, plus grandes.
 
 static lv_obj_t* createListRow(lv_obj_t* parent, int16_t y) {
   lv_obj_t* lbl = lv_label_create(parent);
@@ -646,14 +680,6 @@ static lv_obj_t* createTitle(lv_obj_t* parent, const char* text) {
   lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
   lv_label_set_text(lbl, text);
   lv_obj_align(lbl, LV_ALIGN_TOP_LEFT, 4, 0);
-  return lbl;
-}
-
-static lv_obj_t* createHint(lv_obj_t* parent) {
-  lv_obj_t* lbl = lv_label_create(parent);
-  lv_obj_set_style_text_font(lbl, &lv_font_teko_medium_26, 0);
-  lv_obj_set_style_text_color(lbl, lv_palette_main(LV_PALETTE_GREY), 0);
-  lv_obj_align(lbl, LV_ALIGN_TOP_RIGHT, -4, 4); // a cote du titre (etait en bas d'ecran)
   return lbl;
 }
 
@@ -703,7 +729,6 @@ static void applyCircuitSelection(int i);
 static void openSessionLaps(int i);
 
 static lv_obj_t* circuitListCont;
-static lv_obj_t* lblCircuitHint;
 
 static void buildCircuitScreen() {
   scrCircuit = lv_obj_create(NULL);
@@ -712,7 +737,6 @@ static void buildCircuitScreen() {
   createTitle(scrCircuit, "Circuit");
 
   circuitListCont = createScrollList(scrCircuit, 44); // pleine hauteur -- plus de bouton en bas, "Nouveau circuit" a son propre ecran dans l'anneau
-  lblCircuitHint = createHint(scrCircuit);
 }
 
 static void circuitRowTappedCb(lv_event_t* e) {
@@ -734,13 +758,14 @@ static void refreshCircuitScreen() {
     lv_label_set_text(row, buf);
     lv_obj_add_event_cb(row, circuitRowTappedCb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
   }
-  lv_label_set_text(lblCircuitHint, selectingMode ? "PUSH: valider  BACK: annuler  (ou tap direct)" : "Tap: choisir   BACK: statut");
 }
 
 // ===================== Ecran Connexion =====================
 
 static lv_obj_t* lblConnGps;
 static lv_obj_t* lblConnCircuit;
+static lv_obj_t* lblConnSd;
+static lv_obj_t* lblConnBatt;
 
 static void buildConnexionScreen() {
   scrConnexion = lv_obj_create(NULL);
@@ -750,8 +775,8 @@ static void buildConnexionScreen() {
 
   lblConnGps = createListRow(scrConnexion, 44);
   lblConnCircuit = createListRow(scrConnexion, 84);
-  lv_obj_t* hint = createHint(scrConnexion);
-  lv_label_set_text(hint, "BACK: statut");
+  lblConnSd = createListRow(scrConnexion, 124);
+  lblConnBatt = createListRow(scrConnexion, 164);
 }
 
 static void refreshConnexionScreen() {
@@ -759,13 +784,23 @@ static void refreshConnexionScreen() {
   snprintf(buf, sizeof(buf), "%s  Fix:%d  Sat:%d", gpsActive ? "GPS OK" : "GPS --", gpsFixStatus, gpsNumSVs);
   lv_label_set_text(lblConnGps, buf);
   lv_label_set_text(lblConnCircuit, getActiveCourseNameForDisplay());
+
+  // SD/batterie simulees -- pas de vraie carte/ADC sur ce banc, juste de
+  // quoi verifier que les lignes s'affichent et se colorent comme au reel.
+  snprintf(buf, sizeof(buf), "SD OK  4.2/29.7 GB (simule)");
+  lv_obj_set_style_text_color(lblConnSd, lv_color_white(), 0);
+  lv_label_set_text(lblConnSd, buf);
+
+  int battPct = readBatteryPercent();
+  snprintf(buf, sizeof(buf), "Batt %d%%  (simule)", battPct);
+  lv_obj_set_style_text_color(lblConnBatt, battPct <= 15 ? lv_palette_main(LV_PALETTE_RED) : lv_color_white(), 0);
+  lv_label_set_text(lblConnBatt, buf);
 }
 
 // ===================== Ecran Session (liste) =====================
 
 static lv_obj_t* sessionListCont;
 static lv_obj_t* lblSessionEmpty;
-static lv_obj_t* lblSessionHint;
 static std::vector<SessionSummary> sessionListCache;
 
 static void buildSessionListScreen() {
@@ -776,7 +811,6 @@ static void buildSessionListScreen() {
 
   sessionListCont = createScrollList(scrSessionList, 44);
   lblSessionEmpty = createListRow(scrSessionList, 44);
-  lblSessionHint = createHint(scrSessionList);
 }
 
 static void sessionRowTappedCb(lv_event_t* e) {
@@ -813,7 +847,6 @@ static void refreshSessionListScreen() {
     }
   }
 
-  lv_label_set_text(lblSessionHint, selectingMode ? "PUSH: voir tours  BACK: annuler" : "Tap: voir les tours  BACK: statut");
 }
 
 // Session actuellement selectionnee (meme ordre affiche -- plus recente en premier)
@@ -827,7 +860,6 @@ static const SessionSummary* selectedSession() {
 
 static lv_obj_t* lapListCont;
 static lv_obj_t* lblLapEmpty;
-static lv_obj_t* lblLapHint;
 static std::vector<LapDetail> lapListCache;
 
 // Factorisee -- utilisee a la fois par handleBack() (bouton physique)
@@ -866,9 +898,6 @@ static void buildSessionLapsScreen() {
 
   lapListCont = createScrollList(scrSessionLaps, 44);
   lblLapEmpty = createListRow(scrSessionLaps, 44);
-  lblLapHint = createHint(scrSessionLaps);
-  lv_obj_align(lblLapHint, LV_ALIGN_TOP_RIGHT, -4, 48); // sous le bouton retour, pas de chevauchement
-  lv_label_set_text(lblLapHint, "Glisse: defile  BACK: retour");
 }
 
 static void refreshSessionLapsScreen() {
@@ -909,12 +938,22 @@ static void refreshSessionLapsScreen() {
 // ===================== Ecran Reglages =====================
 
 static lv_obj_t* lblSettingsRow;
-static lv_obj_t* lblSettingsHint;
+static lv_obj_t* lblFreezeRow;
 
 static void settingsRowTappedCb(lv_event_t* e) {
   selectingMode = false;
   wifiStartRequested = true; // traite dans loop(), pas ici (cf. commentaire pres de la declaration)
   goToScreen(SCR_WIFI); // tap direct = ouvre WiFi en un seul geste
+}
+
+// Cycle parmi FREEZE_PRESETS_S a chaque tap (0/5/10/15/20/30s, boucle).
+static void refreshSettingsScreen();
+static void freezeRowTappedCb(lv_event_t* e) {
+  int idx = 0;
+  for (int i = 0; i < FREEZE_PRESETS_COUNT; i++) if (FREEZE_PRESETS_S[i] == lapFreezeS) { idx = i; break; }
+  idx = (idx + 1) % FREEZE_PRESETS_COUNT;
+  lapFreezeS = FREEZE_PRESETS_S[idx];
+  refreshSettingsScreen();
 }
 
 static void buildSettingsScreen() {
@@ -929,14 +968,24 @@ static void buildSettingsScreen() {
   lv_obj_set_style_bg_color(lblSettingsRow, lv_palette_main(LV_PALETTE_YELLOW), LV_STATE_PRESSED);
   lv_obj_set_style_text_color(lblSettingsRow, lv_color_black(), LV_STATE_PRESSED);
   lv_obj_add_event_cb(lblSettingsRow, settingsRowTappedCb, LV_EVENT_CLICKED, NULL);
-  lblSettingsHint = createHint(scrSettings);
+
+  lblFreezeRow = createListRow(scrSettings, 160);
+  lv_obj_add_flag(lblFreezeRow, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_style_bg_opa(lblFreezeRow, LV_OPA_COVER, LV_STATE_PRESSED);
+  lv_obj_set_style_bg_color(lblFreezeRow, lv_palette_main(LV_PALETTE_YELLOW), LV_STATE_PRESSED);
+  lv_obj_set_style_text_color(lblFreezeRow, lv_color_black(), LV_STATE_PRESSED);
+  lv_obj_add_event_cb(lblFreezeRow, freezeRowTappedCb, LV_EVENT_CLICKED, NULL);
 }
 
 static void refreshSettingsScreen() {
   bool sel = selectingMode;
   lv_obj_set_style_text_color(lblSettingsRow, sel ? lv_palette_main(LV_PALETTE_YELLOW) : lv_color_white(), 0);
   lv_label_set_text(lblSettingsRow, sel ? "> WiFi telechargement" : "  WiFi telechargement");
-  lv_label_set_text(lblSettingsHint, sel ? "PUSH: ouvrir   BACK: annuler" : "Tap: ouvrir   BACK: statut");
+
+  char buf[32];
+  if (lapFreezeS == 0) snprintf(buf, sizeof(buf), "  Pause chrono: desactive");
+  else snprintf(buf, sizeof(buf), "  Pause chrono: %ds", lapFreezeS);
+  lv_label_set_text(lblFreezeRow, buf);
 }
 
 // ===================== Ecran WiFi =====================
@@ -956,8 +1005,6 @@ static void buildWifiScreen() {
   lv_obj_t* l4 = createListRowSmall(scrWifi, 156);
   lv_label_set_text(l4, "va sur l'adresse IP depuis un navigateur.");
 
-  lv_obj_t* hint = createHint(scrWifi);
-  lv_label_set_text(hint, "BACK: statut"); // raccourci -- la version longue debordait sur le titre
 }
 
 static void refreshWifiScreen() {
@@ -1004,8 +1051,6 @@ static void buildNewCircuitScreen() {
   lv_label_set_text(lblStart, "Demarrer la capture");
   lv_obj_center(lblStart);
 
-  lv_obj_t* hint = createHint(scrNewCircuit);
-  lv_label_set_text(hint, "BACK: statut");
 }
 
 // ===================== Refresh dispatcher =====================
@@ -1066,9 +1111,14 @@ static void handlePush() {
         break;
       }
       if (millis() - lastDefinitiveStopMs < STATUS_REC_GRACE_AFTER_STOP_MS) break; // cf. commentaire pres de la constante
-      if (detectionEffectivelyComplete()) {
-        startRecording();
+      if (!detectionEffectivelyComplete()) {
+        // 1er PUSH depuis "recherche de circuit" -- simule la detection
+        // (equivalent banc du geofencing GPS reel, qui serait automatique).
+        simDetected = true;
+        break;
       }
+      if (readBatteryPercent() <= LOW_BATT_NO_REC_PERCENT) break; // "NO BAT" affiche a la place -- pas de nouvel enregistrement sous ce seuil
+      startRecording();
       break;
 
     case SCR_CONFIRM_STOP:
@@ -1220,7 +1270,7 @@ void setup() {
     lvglUnlock();
   }
 
-  Serial.println("Pret. Circuit: choisis un circuit (ou Auto) pour simuler la detection. Statut: PUSH demarre/pause le REC (si detecte), BACK va sur Circuit. Anneau: swipe = change d'ecran, tap = selection, BACK = retour.");
+  Serial.println("Pret. Statut: PUSH fait tourner recherche->detecte->REC (avec quelques secondes de paddock simule)->pause. BACK sur Statut va sur Circuit (ou choisis un circuit la-bas pour forcer la detection). Anneau: swipe = change d'ecran, tap = selection, BACK = retour.");
 }
 
 void loop() {
