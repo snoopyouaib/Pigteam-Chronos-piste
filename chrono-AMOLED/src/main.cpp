@@ -356,8 +356,24 @@ static void checkCircuitGeofence(double lat, double lng) {
 static bool lapAnythingEffective() {
   return !manualOverrideActive && courseManager->isLapAnythingActive();
 }
+
+// ----- Mode Route : parcours libre sans detection de tour (balade a
+// velo, trajet en voiture...) -- juste GPS/vitesse/distance/IMU
+// enregistres en continu, sans notion de ligne de depart-arrivee ni de
+// tour. PAS PERSISTE (contrairement a lapFreezeS) : revient toujours a
+// false au demarrage -- mode explicite a reactiver a chaque usage, par
+// securite (pas de risque d'oublier le chrono "bloque" en mode Route
+// apres une balade). Toggle par tap sur l'ecran Reglages. Declare ici
+// (avant sa 1ere utilisation, detectionEffectivelyComplete() juste en
+// dessous) plutot que pres de selectingMode -- erreur de compilation
+// "not declared in this scope" sinon (C++ n'autorise pas l'usage avant
+// declaration, contrairement aux fonctions qui peuvent etre appelees
+// avant leur definition tant qu'elles sont declarees quelque part).
+static bool routeMode = false;
+static unsigned long routeRecStartMs = 0;
+
 static bool detectionEffectivelyComplete() {
-  return manualOverrideActive || courseManager->isDetectionComplete();
+  return routeMode || manualOverrideActive || courseManager->isDetectionComplete();
 }
 
 // ----- Historique GPS court terme (calcul de cap pour la capture de nouveau circuit) -----
@@ -494,6 +510,7 @@ static void checkAutoCircuitCapture(unsigned long timeMs) {
 static void processGpsFix(double lat, double lng, float altM, float speedKnots, unsigned long timeMs) {
   if (liveData.fixStatus < 2) return;
   pushGpsHistory(lat, lng, timeMs);
+  if (routeMode) return; // pas de detection de tour en mode Route -- juste GPS/vitesse/distance (logGpsRow()) accumules en continu
 
   if (!geofenceCheckDone && !manualOverrideActive) {
     checkCircuitGeofence(lat, lng);
@@ -512,6 +529,13 @@ static void processGpsFix(double lat, double lng, float altM, float speedKnots, 
 // ----- Etat d'affichage courant (tour en cours/meilleur/nb de tours) -----
 static void getDisplayState(unsigned long& currentLapMs, unsigned long& bestLapMs, bool& hasBest, int& lapsCount) {
   currentLapMs = 0; bestLapMs = 0; hasBest = false; lapsCount = 0;
+  if (routeMode) {
+    // Pas de garde recordingEnabled ici (declaree plus loin dans le
+    // fichier, "not declared in this scope" sinon) -- sans risque, cette
+    // valeur n'est utilisee par l'appelant que si un REC est en cours.
+    currentLapMs = millis() - routeRecStartMs;
+    return; // mode Route : pas de notion de tour/meilleur, juste la duree ecoulee depuis le depart
+  }
   if (manualOverrideActive) {
     if (manualTimer.getRaceStarted()) currentLapMs = manualTimer.getCurrentLapTime();
     hasBest = manualTimer.getBestLapNumber() > 0;
@@ -539,6 +563,7 @@ static unsigned long getLastFinishedLapMs() {
 }
 
 static const char* getActiveCourseNameForDisplay() {
+  if (routeMode) return "Route";
   if (newCircuitCaptureArmed) return newCircuitAutoSaved ? "Circuit capture !" : "CAPTURE NEW TRACK";
   if (manualOverrideActive) return myTracks.courses[manualCourseIndex].name;
   if (!detectionEffectivelyComplete()) return "Detection...";
@@ -759,6 +784,7 @@ static void startRecording() {
   logFile.flush();
   loggingOk = true;
   recordingEnabled = true;
+  routeRecStartMs = millis(); // n'est utilise que si routeMode est actif, inoffensif sinon
   lastLapCount = 0;
   lapFreezeUntilMs = 0;
   currentLapMaxSpeedKmh = 0.0f;
@@ -927,6 +953,38 @@ static void checkLapCompletion() {
   currentLapMaxAngleLeftDeg = 0.0f;
   wheelieStartMs = 0; stoppieStartMs = 0;
   wheelieCounted = false; stoppieCounted = false;
+}
+
+// Ecrit une ligne "Route" dans /sessions.csv a l'arret definitif --
+// meme format/mêmes accumulateurs que checkLapCompletion() (Vmax/Vmin/
+// Vmoy/distance/depart/wheelie/stoppie/angles), qui se sont accumules
+// en continu sur TOUTE la duree puisque lapsCount reste a 0 en mode
+// Route (cf. getDisplayState()/processGpsFix() plus haut) -- jamais
+// remis a zero par checkLapCompletion(), qui ne se declenche jamais
+// faute de tour detecte. lap_number fixe a 1 (un seul "tour" = le
+// parcours entier), best_lap_time = lap_time (pas de notion de
+// meilleur sur un parcours unique).
+static void finalizeRouteSessionIfNeeded() {
+  if (!routeMode || currentLapSpeedSamples == 0) return; // rien a ecrire si jamais demarre ou aucune trame recue
+
+  char dateBuf[12], timeBuf[10];
+  getLocalDateTime(dateBuf, sizeof(dateBuf), timeBuf, sizeof(timeBuf));
+  char lapBuf[16];
+  formatLapTime(millis() - routeRecStartMs, lapBuf, sizeof(lapBuf));
+
+  float avgSpeedKmh = (currentLapSpeedSamples > 0) ? (float)(currentLapSpeedSumKmh / currentLapSpeedSamples) : 0.0f;
+  float minSpeedKmh = (currentLapMinSpeedKmh < 0) ? 0.0f : currentLapMinSpeedKmh;
+  float distanceKm = (float)(currentLapDistanceM / 1000.0);
+
+  char line[248];
+  snprintf(line, sizeof(line), "%s,%s,%d,%s,%s,%s,%.0f,%.0f,%.0f,%.2f,%s,%d,%d,%.0f,%.0f",
+           dateBuf, timeBuf, 1, lapBuf, lapBuf, "Route",
+           currentLapMaxSpeedKmh, minSpeedKmh, avgSpeedKmh, distanceKm, currentLapStartTimeStr,
+           currentLapWheelieCount, currentLapStoppieCount,
+           currentLapMaxAngleRightDeg, fabsf(currentLapMaxAngleLeftDeg));
+  appendSessionLine(line);
+  Serial.printf("Route enregistree : %s (Vmax %.0f, Vmin %.0f, Vmoy %.0f km/h, %.2f km, depart %s)\n",
+               lapBuf, currentLapMaxSpeedKmh, minSpeedKmh, avgSpeedKmh, distanceKm, currentLapStartTimeStr);
 }
 
 // ===================== WebServerManager (WiFi/telechargement) =====================
@@ -1421,6 +1479,25 @@ static void updateStatusScreen(unsigned long nowMs) {
     lv_obj_add_flag(lblBest, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(lblTours, LV_OBJ_FLAG_HIDDEN);
 
+  } else if (routeMode) {
+    // Mode Route : vitesse en gros comme avant REC (plus utile en
+    // continu qu'un chrono qui defile), chrono du parcours (duree
+    // ecoulee depuis le depart, ne repart jamais a zero) en dessous, a
+    // la place de "Dernier". Best/Tours toujours masques (aucun sens
+    // sans notion de tour).
+    snprintf(buf, sizeof(buf), "%d km/h", (int)gpsSpeedKmh);
+    lv_label_set_text(lblBig, buf);
+    lv_obj_align(lblBig, LV_ALIGN_TOP_MID, 0, 40);
+
+    formatLapTime(currentLapMs, buf, sizeof(buf));
+    lv_label_set_text(lblDernier, buf);
+    lv_obj_clear_flag(lblDernier, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_add_flag(lblBest, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(lblTours, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(lblClock, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(lblRecHint, LV_OBJ_FLAG_HIDDEN);
+
   } else {
     if (millis() < lapFreezeUntilMs) {
       // Tour vient de se terminer -- affiche encore son temps fige,
@@ -1755,6 +1832,7 @@ static void refreshSessionLapsScreen() {
 
 static lv_obj_t* lblSettingsRow;
 static lv_obj_t* lblFreezeRow;
+static lv_obj_t* lblRouteRow;
 
 static void settingsRowTappedCb(lv_event_t* e) {
   selectingMode = false;
@@ -1775,6 +1853,17 @@ static void freezeRowTappedCb(lv_event_t* e) {
   refreshSettingsScreen();
 }
 
+// Toggle ON/OFF par tap -- pas de sauvegarde (routeMode n'est jamais
+// persiste, cf. commentaire pres de sa declaration). Ignore le tap si
+// un enregistrement est en cours : changer de mode en plein REC
+// laisserait les accumulateurs de stats dans un etat incoherent (deja
+// utilises pour un circuit, plus pour une route, ou l'inverse).
+static void routeRowTappedCb(lv_event_t* e) {
+  if (recordingEnabled) return;
+  routeMode = !routeMode;
+  refreshSettingsScreen();
+}
+
 static void buildSettingsScreen() {
   scrSettings = lv_obj_create(NULL);
   lv_obj_set_style_bg_color(scrSettings, lv_color_black(), 0);
@@ -1788,12 +1877,19 @@ static void buildSettingsScreen() {
   lv_obj_set_style_text_color(lblSettingsRow, lv_color_black(), LV_STATE_PRESSED);
   lv_obj_add_event_cb(lblSettingsRow, settingsRowTappedCb, LV_EVENT_CLICKED, NULL);
 
-  lblFreezeRow = createListRow(scrSettings, 160);
+  lblFreezeRow = createListRow(scrSettings, 150);
   lv_obj_add_flag(lblFreezeRow, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_set_style_bg_opa(lblFreezeRow, LV_OPA_COVER, LV_STATE_PRESSED);
   lv_obj_set_style_bg_color(lblFreezeRow, lv_palette_main(LV_PALETTE_YELLOW), LV_STATE_PRESSED);
   lv_obj_set_style_text_color(lblFreezeRow, lv_color_black(), LV_STATE_PRESSED);
   lv_obj_add_event_cb(lblFreezeRow, freezeRowTappedCb, LV_EVENT_CLICKED, NULL);
+
+  lblRouteRow = createListRow(scrSettings, 196);
+  lv_obj_add_flag(lblRouteRow, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_style_bg_opa(lblRouteRow, LV_OPA_COVER, LV_STATE_PRESSED);
+  lv_obj_set_style_bg_color(lblRouteRow, lv_palette_main(LV_PALETTE_YELLOW), LV_STATE_PRESSED);
+  lv_obj_set_style_text_color(lblRouteRow, lv_color_black(), LV_STATE_PRESSED);
+  lv_obj_add_event_cb(lblRouteRow, routeRowTappedCb, LV_EVENT_CLICKED, NULL);
 }
 
 static void refreshSettingsScreen() {
@@ -1805,6 +1901,9 @@ static void refreshSettingsScreen() {
   if (lapFreezeS == 0) snprintf(buf, sizeof(buf), "  Pause chrono: desactive");
   else snprintf(buf, sizeof(buf), "  Pause chrono: %ds", lapFreezeS);
   lv_label_set_text(lblFreezeRow, buf);
+
+  lv_obj_set_style_text_color(lblRouteRow, routeMode ? lv_palette_main(LV_PALETTE_GREEN) : lv_color_white(), 0);
+  lv_label_set_text(lblRouteRow, routeMode ? "  Mode Route: ON" : "  Mode Route: OFF");
 }
 
 // ===================== Ecran WiFi =====================
@@ -2002,6 +2101,7 @@ static void handleBack() {
       // pour qu'aucun faux contact ne puisse relancer l'enregistrement une
       // fois qu'on a quitte la piste. Le timeout dans loop() couvre le cas
       // ou on oublie de confirmer avant de prendre la route.
+      finalizeRouteSessionIfNeeded(); // no-op si routeMode est false
       activateAutoMode(); // reset complet du courseManager + des flags d'armement
       lastDefinitiveStopMs = millis(); // cf. STATUS_REC_GRACE_AFTER_STOP_MS -- le geofencing peut rearmer le circuit en ~1s
       goToScreen(SCR_STATUS);
@@ -2180,6 +2280,7 @@ void loop() {
       // Timeout de securite : personne n'a choisi (BACK ou REPRENDRE) --
       // on confirme l'arret tout seul plutot que de laisser cet ecran arme
       // indefiniment (cf. commentaire pres de CONFIRM_STOP_TIMEOUT_MS).
+      finalizeRouteSessionIfNeeded(); // no-op si routeMode est false
       activateAutoMode();
       lastDefinitiveStopMs = nowCheck; // cf. STATUS_REC_GRACE_AFTER_STOP_MS -- le geofencing peut rearmer le circuit en ~1s
       goToScreen(SCR_STATUS);

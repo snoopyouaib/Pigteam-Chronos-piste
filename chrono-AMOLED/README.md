@@ -232,6 +232,38 @@ pour ne compter qu'une fois un evenement soutenu.
   principe que l'angle en continu : pas le temps de regarder un ecran
   en pleine inclinaison).
 
+## Mode Route -- parcours libre sans détection de tour (29/07)
+
+Nouvelle ligne "Mode Route" dans Réglages (toggle par tap, ON/OFF) pour
+enregistrer n'importe quel trajet sans notion de circuit -- balade à
+vélo, trajet en voiture. GPS/vitesse/distance/IMU (angle, wheelie/
+stoppie) toujours enregistrés en continu, mais **aucune détection de
+tour** : pas de ligne de départ-arrivée, pas de geofencing, pas de
+`CourseManager` engagé.
+
+- **PAS PERSISTÉ** (contrairement à "Pause chrono") : revient toujours
+  à OFF au démarrage -- mode explicite à réactiver à chaque usage, par
+  sécurité (pas de risque d'oublier le chrono "bloqué" en mode Route
+  après une balade).
+- **"Route" affiché à la place du nom de circuit** partout où celui-ci
+  apparaît (écran Statut, Connexion, logs).
+- **Écran Statut adapté** : le gros chrono devient un simple
+  chronomètre (durée écoulée depuis le départ, ne repart jamais à
+  zéro), "Dernier/Best/Tours" masqués (aucun sens sans tours).
+- **`/sessions.csv`** : une seule ligne "Route" écrite à l'arrêt
+  définitif (pas à chaque pause), avec les mêmes statistiques que pour
+  un tour de circuit (Vmax/Vmin/Vmoy/distance/départ/wheelie-stoppie/
+  angle max) accumulées sur tout le trajet -- `lap_number` fixé à 1,
+  `best_lap_time` = `lap_time` (pas de notion de "meilleur" sur un
+  parcours unique).
+- **Toggle bloqué pendant un enregistrement** : changer de mode en
+  plein REC laisserait les accumulateurs de stats dans un état
+  incohérent (déjà utilisés pour un circuit, plus pour une route, ou
+  l'inverse) -- il faut arrêter avant de basculer.
+- Réutilise entièrement les contrôles REC/pause/arrêt existants (PUSH/
+  BACK, écran de confirmation) -- aucune nouvelle interaction à
+  apprendre, seule la détection de tour est désactivée.
+
 ## Nouveautés du 29/07
 
 - **Écran Connexion enrichi** : en plus de GPS et Circuit, affiche
