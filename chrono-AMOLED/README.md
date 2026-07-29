@@ -264,6 +264,17 @@ tour** : pas de ligne de départ-arrivée, pas de geofencing, pas de
   BACK, écran de confirmation) -- aucune nouvelle interaction à
   apprendre, seule la détection de tour est désactivée.
 
+- **Timeout automatique de l'écran de pause supprimé** : "Enregistrement
+  en pause" (BACK pendant le REC) restait auparavant armé au maximum
+  5 minutes avant de confirmer l'arrêt tout seul (filet de sécurité en
+  cas d'oubli). Retiré -- l'écran reste maintenant armé indéfiniment
+  tant que PUSH (reprendre) ou BACK (arrêter) n'est pas pressé. Devient
+  vraiment utile avec le **mode Route** (pause volontaire en cours de
+  trajet, ex. un arrêt café, sans limite de temps à respecter). La
+  garde anti-faux-contact de 600ms à l'entrée de l'écran est conservée
+  (mécanisme distinct, protège contre un rebond tactile/mécanique
+  immédiat, pas contre un oubli prolongé).
+
 ## Nouveautés du 29/07
 
 - **Écran Connexion enrichi** : en plus de GPS et Circuit, affiche

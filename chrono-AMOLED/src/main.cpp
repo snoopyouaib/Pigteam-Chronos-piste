@@ -1189,12 +1189,6 @@ static void handleSerialCommands() {
 
 enum AppScreen { SCR_STATUS, SCR_CIRCUIT, SCR_CONNEXION, SCR_SESSION_LIST, SCR_SESSION_LAPS, SCR_SETTINGS, SCR_WIFI, SCR_NEW_CIRCUIT, SCR_CONFIRM_STOP };
 static AppScreen currentScreen = SCR_STATUS;
-// Duree max sur SCR_CONFIRM_STOP avant arret definitif automatique --
-// filet de securite si on oublie de valider (BACK) ou de reprendre
-// (tactile/PUSH) en quittant la piste. Sans ca, l'ecran resterait arme
-// indefiniment et un faux contact tactile pourrait relancer
-// l'enregistrement (cf. bug du 27/07 -- circuit jamais desarme apres stop).
-static const unsigned long CONFIRM_STOP_TIMEOUT_MS = 300000UL; // 5 minutes
 static unsigned long confirmStopEnteredMs = 0;
 // Faux contact electrique (bruit sur l'alim, pas forcement un vrai doigt)
 // = evenement quasi instantane. Un vrai choix humain de REPRENDRE prend
@@ -1378,12 +1372,12 @@ static void buildStatusScreen() {
 // directement -- il ouvre cet ecran. Le PUSH relance aussitot, le
 // circuit etant reste arme (courseManager pas reset par stopRecording()).
 // BACK confirme l'arret definitif (desarme le circuit, cf. handleBack()).
-// Un timeout de securite (CONFIRM_STOP_TIMEOUT_MS) confirme automatiquement
-// l'arret si on oublie de choisir avant de prendre la route. Aucun bouton
-// tactile REPRENDRE (28/07) : preuve au Serial d'un faux contact capacitif
-// declenchant l'enregistrement seul -- cf. commentaire pres de lblRecHint
-// dans buildStatusScreen().
-static lv_obj_t* lblConfirmCountdown;
+// Plus de timeout automatique (29/07, cf. commentaire pres de
+// refreshConfirmStopScreen()) -- cet ecran reste arme indefiniment tant
+// que PUSH ou BACK n'a pas ete presse. Aucun bouton tactile REPRENDRE
+// (28/07) : preuve au Serial d'un faux contact capacitif declenchant
+// l'enregistrement seul -- cf. commentaire pres de lblRecHint dans
+// buildStatusScreen().
 
 static void buildConfirmStopScreen() {
   scrConfirmStop = lv_obj_create(NULL);
@@ -1411,19 +1405,16 @@ static void buildConfirmStopScreen() {
   lv_obj_set_style_text_color(lblBack, lv_color_white(), 0);
   lv_label_set_text(lblBack, "BACK pour arreter");
   lv_obj_align(lblBack, LV_ALIGN_CENTER, 0, 60);
-
-  lblConfirmCountdown = lv_label_create(scrConfirmStop);
-  lv_obj_set_style_text_font(lblConfirmCountdown, &lv_font_teko_medium_26, 0);
-  lv_obj_set_style_text_color(lblConfirmCountdown, lv_palette_main(LV_PALETTE_GREY), 0);
-  lv_obj_align(lblConfirmCountdown, LV_ALIGN_BOTTOM_MID, 0, -8);
 }
 
 static void refreshConfirmStopScreen() {
-  long remainingS = (long)(CONFIRM_STOP_TIMEOUT_MS - (millis() - confirmStopEnteredMs)) / 1000;
-  if (remainingS < 0) remainingS = 0;
-  char buf[32];
-  snprintf(buf, sizeof(buf), "Arret auto dans %lds", remainingS);
-  lv_label_set_text(lblConfirmCountdown, buf);
+  // Plus de decompte automatique (29/07) -- cet ecran reste arme
+  // indefiniment tant que PUSH (reprendre) ou BACK (arreter) n'a pas
+  // ete presse, plus de securite de repli qui confirmait l'arret tout
+  // seul. Desormais utile en tant que tel avec le mode Route (pause
+  // volontaire en cours de trajet, ex. un arret cafe, sans limite de
+  // temps a respecter). Fonction gardee vide plutot que supprimee --
+  // appelee depuis refreshCurrentScreen(), simplifie l'appelant.
 }
 
 static void updateStatusScreen(unsigned long nowMs) {
@@ -1870,21 +1861,21 @@ static void buildSettingsScreen() {
   enableRingSwipe(scrSettings);
   createTitle(scrSettings, "Reglages");
 
-  lblSettingsRow = createListRow(scrSettings, 100);
+  lblSettingsRow = createListRow(scrSettings, 55);
   lv_obj_add_flag(lblSettingsRow, LV_OBJ_FLAG_CLICKABLE); // idem -- label non cliquable par defaut
   lv_obj_set_style_bg_opa(lblSettingsRow, LV_OPA_COVER, LV_STATE_PRESSED);
   lv_obj_set_style_bg_color(lblSettingsRow, lv_palette_main(LV_PALETTE_YELLOW), LV_STATE_PRESSED);
   lv_obj_set_style_text_color(lblSettingsRow, lv_color_black(), LV_STATE_PRESSED);
   lv_obj_add_event_cb(lblSettingsRow, settingsRowTappedCb, LV_EVENT_CLICKED, NULL);
 
-  lblFreezeRow = createListRow(scrSettings, 150);
+  lblFreezeRow = createListRow(scrSettings, 105);
   lv_obj_add_flag(lblFreezeRow, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_set_style_bg_opa(lblFreezeRow, LV_OPA_COVER, LV_STATE_PRESSED);
   lv_obj_set_style_bg_color(lblFreezeRow, lv_palette_main(LV_PALETTE_YELLOW), LV_STATE_PRESSED);
   lv_obj_set_style_text_color(lblFreezeRow, lv_color_black(), LV_STATE_PRESSED);
   lv_obj_add_event_cb(lblFreezeRow, freezeRowTappedCb, LV_EVENT_CLICKED, NULL);
 
-  lblRouteRow = createListRow(scrSettings, 196);
+  lblRouteRow = createListRow(scrSettings, 155);
   lv_obj_add_flag(lblRouteRow, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_set_style_bg_opa(lblRouteRow, LV_OPA_COVER, LV_STATE_PRESSED);
   lv_obj_set_style_bg_color(lblRouteRow, lv_palette_main(LV_PALETTE_YELLOW), LV_STATE_PRESSED);
@@ -2262,34 +2253,9 @@ void loop() {
     webServerManager.stopDownloadMode();
   }
 
-  if (currentScreen == SCR_CONFIRM_STOP) {
-    // BUG CORRIGE (28/07) : nowMs est capture UNE FOIS en haut de loop(),
-    // avant tout traitement de bouton. Si on entre sur SCR_CONFIRM_STOP
-    // dans CETTE MEME iteration (confirmStopEnteredMs = millis() appele
-    // plus tard, dans handlePush()), confirmStopEnteredMs peut alors etre
-    // *posterieur* a nowMs. Comme ce sont des unsigned long, nowMs -
-    // confirmStopEnteredMs ne devient pas negatif mais boucle par en
-    // dessous (~4 milliards), ce qui depasse instantanement
-    // CONFIRM_STOP_TIMEOUT_MS et confirme l'arret en quelques ms au lieu
-    // de 2 minutes -- cause reelle de tous les "ca va trop vite pour etre
-    // vu" observes, quel que soit le bouton implique. Fix : capturer un
-    // millis() frais ici, strictement posterieur ou egal a
-    // confirmStopEnteredMs puisque le temps ne remonte jamais.
-    unsigned long nowCheck = millis();
-    if (nowCheck - confirmStopEnteredMs >= CONFIRM_STOP_TIMEOUT_MS) {
-      // Timeout de securite : personne n'a choisi (BACK ou REPRENDRE) --
-      // on confirme l'arret tout seul plutot que de laisser cet ecran arme
-      // indefiniment (cf. commentaire pres de CONFIRM_STOP_TIMEOUT_MS).
-      finalizeRouteSessionIfNeeded(); // no-op si routeMode est false
-      activateAutoMode();
-      lastDefinitiveStopMs = nowCheck; // cf. STATUS_REC_GRACE_AFTER_STOP_MS -- le geofencing peut rearmer le circuit en ~1s
-      goToScreen(SCR_STATUS);
-    }
-  }
-
   static unsigned long lastRender = 0;
   bool isLiveScreen = (currentScreen == SCR_STATUS || currentScreen == SCR_CONNEXION ||
-                       currentScreen == SCR_CONFIRM_STOP); // decompte du timeout -- doit se rafraichir seul
+                       currentScreen == SCR_CONFIRM_STOP);
   bool timeToRender = isLiveScreen && (nowMs - lastRender >= 250);
   if (timeToRender || screenDirty) {
     lastRender = nowMs;
