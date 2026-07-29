@@ -59,8 +59,8 @@
 // desormais entierement sur le tactile (swipe pour l'anneau, tap direct
 // pour les listes -- deja fonctionnel en parallele avant ce changement,
 // cf. ringScreenGestureCb() et les commentaires "Tap: choisir").
-#define PUSH_BUTTON   10
-#define BACK_BUTTON   14
+#define PUSH_BUTTON   16  // etait GPIO10 -- deplace le 29/07 (GPIO16 libre, pas de strapping/PSRAM sur ESP32-S3)
+#define BACK_BUTTON   3  // etait GPIO14 puis GPIO2 -- deplace le 29/07 (erreur de soudure). GPIO3 = strapping JTAG sur ESP32-S3, sans impact sur le fonctionnement normal (juste la source JTAG si maintenu appuye pile au demarrage)
 
 volatile bool backButtonPressed = false;
 static unsigned long lastBackIsrMs = 0;
