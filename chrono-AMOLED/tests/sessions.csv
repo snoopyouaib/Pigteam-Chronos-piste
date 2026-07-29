@@ -1,4 +1,3 @@
-date,local_time,lap_number,lap_time,best_lap_time,circuit
 # session demarree 20260714_134325
 2026-07-14,13:50:03,1,1:03.453,1:03.453,Croix-en-Ternois
 2026-07-14,13:51:07,2,1:03.785,1:03.453,Croix-en-Ternois
@@ -63,4 +62,7 @@ date,local_time,lap_number,lap_time,best_lap_time,circuit
 # session demarree 20260729_124931
 2026-07-29,12:52:17,1,2:16.153,2:16.153,PigTeam_track,61,25,46,1.75,12:50:00,0,0,0,19
 2026-07-29,12:53:25,2,1:08.014,1:08.014,PigTeam_track,59,28,45,0.85,12:52:18,0,0,0,17
+# session arretee
+# session demarree 20260729_152741
+2026-07-29,15:28:10,1,0:28.323,0:28.323,Route,0,0,0,0.00,15:27:42,0,0,9,1
 # session arretee

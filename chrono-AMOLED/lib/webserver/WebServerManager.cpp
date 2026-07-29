@@ -269,6 +269,57 @@ struct SessionSummaryLite {
 
 static bool isRouteSummary(const SessionSummaryLite& s) { return s.circuit == "Route"; }
 
+// Compte les lignes de donnees presentes HORS de tout bloc "# session
+// demarree"/"# session arretee" -- ne devrait normalement jamais
+// arriver, mais peut se produire si finalizeRouteSessionIfNeeded() (ou
+// tout autre code d'ecriture) tourne alors qu'aucune session n'est
+// ouverte (cf. bug d'ordre d'ecriture corrige le 29/07 -- ce compteur
+// sert justement a detecter s'il en reste d'anciennes, ecrites avant
+// le fix). Scalaire uniquement (un entier), meme profil memoire que
+// loadSessionSummaries().
+static int countOrphanSessionLines() {
+  File f = LittleFS.open(g_sessionLogPath, "r");
+  if (!f) return 0;
+  int count = 0;
+  bool inBlock = false;
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.length() == 0 || line.startsWith("date,")) continue;
+    if (line.startsWith("# session demarree")) { inBlock = true; continue; }
+    if (line.startsWith("# session arretee")) { inBlock = false; continue; }
+    if (!inBlock) count++;
+  }
+  f.close();
+  return count;
+}
+
+// Retire du carnet toutes les lignes de donnees orphelines (hors de
+// tout bloc demarree/arretee), sans toucher aux blocs eux-memes ni a
+// leurs marqueurs -- symetrique de pruneSessionFromCarnet() (qui vise
+// UN bloc precis par sa cle), ici on vise au contraire tout ce qui n'a
+// PAS de bloc du tout.
+static void stripOrphanSessionLines() {
+  File f = LittleFS.open(g_sessionLogPath, "r");
+  if (!f) return;
+  std::vector<String> keptLines;
+  bool inBlock = false;
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.length() == 0) continue;
+    if (line.startsWith("# session demarree")) { inBlock = true; keptLines.push_back(line); continue; }
+    if (line.startsWith("# session arretee")) { inBlock = false; keptLines.push_back(line); continue; }
+    if (inBlock) keptLines.push_back(line); // sinon (orpheline) -- pas conservee
+  }
+  f.close();
+
+  File out = LittleFS.open(g_sessionLogPath, "w");
+  if (!out) return;
+  for (const String& l : keptLines) out.println(l);
+  out.close();
+}
+
 static String stripSeparators(const String& s) {
   String out;
   out.reserve(s.length());
@@ -1327,6 +1378,23 @@ static void handleDebugPage() {
   html += "<button type='submit' style='background:#b62324'>Vider tout le carnet de session</button>";
   html += "</form>";
 
+  // ----- Lignes orphelines (hors de tout bloc demarree/arretee) -----
+  // Ne devrait normalement pas arriver -- symptome d'un bug d'ecriture
+  // passe (cf. commentaire de countOrphanSessionLines()) plutot qu'un
+  // etat normal. N'apparaissent PAS dans la liste "Sessions du carnet"
+  // ci-dessous (elle vient de loadSessionSummaries(), qui ne les voit
+  // pas non plus faute de marqueur) -- sans ce bouton dedie, aucun
+  // moyen de les retirer depuis le webserver.
+  int orphanCount = countOrphanSessionLines();
+  if (orphanCount > 0) {
+    html += "<div class='card' style='display:block;font-size:13px;margin-top:12px'>";
+    html += String(orphanCount) + " ligne(s) orpheline(s) trouvee(s) dans le carnet (hors de tout bloc session -- ";
+    html += "ne peuvent pas apparaitre dans la liste ci-dessous ni etre selectionnees individuellement).</div>";
+    html += "<form action='/debug/strip-orphans' method='GET' onsubmit=\"return confirm('Retirer les " + String(orphanCount) + " ligne(s) orpheline(s) du carnet ? Irreversible -- les sessions normales ne sont pas affectees.');\">";
+    html += "<button type='submit' style='background:#b62324'>Retirer les lignes orphelines</button>";
+    html += "</form>";
+  }
+
   // ----- Fichier /croix_replay.csv (mode exemple, retire du firmware) -----
   // uploadfs (USB) reecrit toute l'image LittleFS d'un coup et efface
   // donc ce fichier avec elle, mais tant que l'USB n'est pas dispo (OTA
@@ -1435,6 +1503,13 @@ static void handleDebugDeleteFile() {
 // retrouvait avec le bloc du carnet propre mais le fichier GPS detaille
 // (souvent le plus gros, cf. octets affiches sur la page Sessions) qui
 // trainait toujours sur la LittleFS.
+static void handleDebugStripOrphans() {
+  int before = countOrphanSessionLines();
+  stripOrphanSessionLines();
+  String message = (before > 0) ? (String(before) + " ligne(s) orpheline(s) retiree(s) du carnet") : "Aucune ligne orpheline trouvee";
+  restartToApplyChange("home", message);
+}
+
 static void handleDebugDeleteSessions() {
   int removed = 0;
   int n = httpServer.args();
@@ -2519,6 +2594,7 @@ void WebServerManager::startDownloadMode() {
   httpServer.on("/debug", HTTP_GET, handleDebugPage);
   httpServer.on("/debug/clear-sessions", HTTP_GET, handleDebugClearSessions);
   httpServer.on("/debug/delete-sessions", HTTP_GET, handleDebugDeleteSessions);
+  httpServer.on("/debug/strip-orphans", HTTP_GET, handleDebugStripOrphans);
   httpServer.on("/debug/delete-file", HTTP_GET, handleDebugDeleteFile);
   httpServer.on("/import", HTTP_GET, handleImportPage);
   httpServer.on("/import/logs", HTTP_POST, handleImportLogsResult, handleImportLogsUpload);
