@@ -1641,7 +1641,7 @@ static void buildSettingsScreen() {
   lv_obj_set_style_text_color(lblSettingsRow, lv_color_black(), LV_STATE_PRESSED);
   lv_obj_add_event_cb(lblSettingsRow, settingsRowTappedCb, LV_EVENT_CLICKED, NULL);
 
-  lblFreezeRow = createListRow(scrSettings, 140);
+  lblFreezeRow = createListRow(scrSettings, 160);
   lv_obj_add_flag(lblFreezeRow, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_set_style_bg_opa(lblFreezeRow, LV_OPA_COVER, LV_STATE_PRESSED);
   lv_obj_set_style_bg_color(lblFreezeRow, lv_palette_main(LV_PALETTE_YELLOW), LV_STATE_PRESSED);
@@ -1655,8 +1655,8 @@ static void refreshSettingsScreen() {
   lv_label_set_text(lblSettingsRow, sel ? "> WiFi telechargement" : "  WiFi telechargement");
 
   char buf[32];
-  if (lapFreezeS == 0) snprintf(buf, sizeof(buf), "  Temps de pose: desactive");
-  else snprintf(buf, sizeof(buf), "  Temps de pose: %ds", lapFreezeS);
+  if (lapFreezeS == 0) snprintf(buf, sizeof(buf), "  Pause chrono: desactive");
+  else snprintf(buf, sizeof(buf), "  Pause chrono: %ds", lapFreezeS);
   lv_label_set_text(lblFreezeRow, buf);
 }
 

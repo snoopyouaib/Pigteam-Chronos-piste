@@ -138,6 +138,38 @@ Petite série de retouches suite à la calibration sur le banc
   est conservé (ce n'est pas un hint de navigation mais l'invite
   fonctionnelle qui indique quand appuyer sur REC).
 
+## Nouveautés du 29/07
+
+- **Écran Connexion enrichi** : en plus de GPS et Circuit, affiche
+  désormais le **stockage** (`SD OK  x.x/y.y GB` en blanc, ou
+  `SD --  repli LittleFS` en orange si la carte est absente/en panne --
+  via `gpsLogsOnSd`/`sdUsedBytes()`/`sdTotalBytes()`, déjà exposés par
+  `SdLogStorage.h`) et la **batterie** (`Batt XX%  (Y.YYV)`, rouge si
+  ≤15%) -- un coup d'œil suffit pour vérifier que tous les modules
+  répondent avant de partir rouler.
+- **Sécurité batterie faible ("NO BAT")** : sous 5%
+  (`LOW_BATT_NO_REC_PERCENT`), le "PRESS REC" clignotant de l'écran
+  Statut devient "NO BAT" et PUSH ne démarre plus d'enregistrement --
+  évite de couper l'alimentation en plein tour (perte du log en cours)
+  et d'user une batterie déjà quasi vide. Ne bloque que le
+  **démarrage** : un enregistrement déjà en cours n'est pas interrompu,
+  et la reprise depuis l'écran "Enregistrement en pause" n'est pas
+  (encore) protégée par ce même seuil -- l'utilité réelle de cet écran
+  de pause/reprise est encore en réflexion, pas la peine d'y ajouter la
+  garde tant que ce n'est pas tranché.
+- **Chrono figé au passage de ligne, désormais réglable ("Pause
+  chrono")** : au lieu de repartir instantanément à 0 après un tour, le
+  gros chrono reste affiché sur le temps du tour qui vient de se
+  terminer pendant `lapFreezeS` secondes (`checkLapCompletion()` arme
+  `lapFreezeUntilMs` à chaque tour -- un tour plus rapide que ce délai
+  écourte naturellement le gel précédent au profit du nouveau temps).
+  N'affecte que l'affichage, rien n'est retardé côté
+  enregistrement/logs. Réglable depuis l'écran **Réglages** -- une
+  nouvelle ligne "Pause chrono" sous "WiFi téléchargement", un tap
+  cycle parmi 0 (désactivé) / 5 / 10 / 15 / 20 / 30s -- persisté sur
+  LittleFS (`/settings.csv`) pour survivre à un redémarrage, 10s par
+  défaut si le fichier est absent/corrompu.
+
 ## Pièges de compilation rencontrés
 
 - **`hideakitai/ArxTypeTraits`** (dépendance de DovesLapTimer) : la
