@@ -190,16 +190,48 @@ static CourseManager* courseManager = nullptr;
 static int lastLapCount = 0;
 
 // Fige l'affichage du chrono sur le temps du tour qui vient de se
-// terminer pendant LAP_DISPLAY_FREEZE_MS apres le passage de ligne,
-// au lieu de repartir instantanement a 0 -- laisse le temps de lire le
+// terminer pendant lapFreezeS secondes apres le passage de ligne, au
+// lieu de repartir instantanement a 0 -- laisse le temps de lire le
 // tour avant que le compteur du tour suivant prenne sa place. Remis a
 // jour a CHAQUE tour termine (checkLapCompletion()), donc un tour plus
 // rapide que ce delai ecourte naturellement le gel precedent au profit
 // du nouveau temps. N'affecte que l'affichage : le chrono/la detection
 // sous-jacents (CourseManager/DovesLapTimer) continuent normalement,
 // rien n'est retarde cote enregistrement.
+//
+// Reglable depuis l'ecran Reglages (tap sur la ligne -- cycle parmi
+// FREEZE_PRESETS_S), persiste sur LittleFS (SETTINGS_FILE_PATH) pour
+// survivre a un redemarrage.
 static unsigned long lapFreezeUntilMs = 0;
-static const unsigned long LAP_DISPLAY_FREEZE_MS = 10000UL;
+static int lapFreezeS = 10;
+static const int FREEZE_PRESETS_S[] = { 0, 5, 10, 15, 20, 30 };
+static const int FREEZE_PRESETS_COUNT = 6;
+static const char* SETTINGS_FILE_PATH = "/settings.csv";
+
+static void saveDisplaySettings() {
+  File f = LittleFS.open(SETTINGS_FILE_PATH, "w");
+  if (!f) { Serial.println("Reglages : echec ecriture /settings.csv"); return; }
+  f.printf("lapFreezeS,%d\n", lapFreezeS);
+  f.close();
+}
+
+static void loadDisplaySettings() {
+  if (!LittleFS.exists(SETTINGS_FILE_PATH)) return; // 1er boot -- garde les valeurs par defaut
+  File f = LittleFS.open(SETTINGS_FILE_PATH, "r");
+  if (!f) return;
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.startsWith("lapFreezeS,")) {
+      int v = line.substring(11).toInt();
+      // Ignore toute valeur hors des presets connus (fichier corrompu/edite a la main).
+      for (int i = 0; i < FREEZE_PRESETS_COUNT; i++) {
+        if (FREEZE_PRESETS_S[i] == v) { lapFreezeS = v; break; }
+      }
+    }
+  }
+  f.close();
+}
 
 static int splitCsvLine(const String& line, String fields[], int maxFields) {
   int count = 0, start = 0;
@@ -745,7 +777,7 @@ static void checkLapCompletion() {
   getDisplayState(currentLapMs, bestLapMs, hasBest, lapsCount);
   if (lapsCount <= lastLapCount) return;
   lastLapCount = lapsCount;
-  lapFreezeUntilMs = millis() + LAP_DISPLAY_FREEZE_MS;
+  lapFreezeUntilMs = millis() + (unsigned long)lapFreezeS * 1000UL;
 
   char dateBuf[12], timeBuf[10];
   getLocalDateTime(dateBuf, sizeof(dateBuf), timeBuf, sizeof(timeBuf));
@@ -1575,11 +1607,25 @@ static void refreshSessionLapsScreen() {
 // ===================== Ecran Reglages =====================
 
 static lv_obj_t* lblSettingsRow;
+static lv_obj_t* lblFreezeRow;
 
 static void settingsRowTappedCb(lv_event_t* e) {
   selectingMode = false;
   wifiStartRequested = true; // traite dans loop(), pas ici (cf. commentaire pres de la declaration)
   goToScreen(SCR_WIFI); // tap direct = ouvre WiFi en un seul geste
+}
+
+// Cycle parmi FREEZE_PRESETS_S a chaque tap (0/5/10/15/20/30s, boucle) --
+// pas de PUSH implique ici, comme "Demarrer la capture" sur l'ecran
+// Nouveau circuit (tout-tactile pour ce genre de reglage simple).
+static void refreshSettingsScreen();
+static void freezeRowTappedCb(lv_event_t* e) {
+  int idx = 0;
+  for (int i = 0; i < FREEZE_PRESETS_COUNT; i++) if (FREEZE_PRESETS_S[i] == lapFreezeS) { idx = i; break; }
+  idx = (idx + 1) % FREEZE_PRESETS_COUNT;
+  lapFreezeS = FREEZE_PRESETS_S[idx];
+  saveDisplaySettings();
+  refreshSettingsScreen();
 }
 
 static void buildSettingsScreen() {
@@ -1594,12 +1640,24 @@ static void buildSettingsScreen() {
   lv_obj_set_style_bg_color(lblSettingsRow, lv_palette_main(LV_PALETTE_YELLOW), LV_STATE_PRESSED);
   lv_obj_set_style_text_color(lblSettingsRow, lv_color_black(), LV_STATE_PRESSED);
   lv_obj_add_event_cb(lblSettingsRow, settingsRowTappedCb, LV_EVENT_CLICKED, NULL);
+
+  lblFreezeRow = createListRow(scrSettings, 140);
+  lv_obj_add_flag(lblFreezeRow, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_style_bg_opa(lblFreezeRow, LV_OPA_COVER, LV_STATE_PRESSED);
+  lv_obj_set_style_bg_color(lblFreezeRow, lv_palette_main(LV_PALETTE_YELLOW), LV_STATE_PRESSED);
+  lv_obj_set_style_text_color(lblFreezeRow, lv_color_black(), LV_STATE_PRESSED);
+  lv_obj_add_event_cb(lblFreezeRow, freezeRowTappedCb, LV_EVENT_CLICKED, NULL);
 }
 
 static void refreshSettingsScreen() {
   bool sel = selectingMode;
   lv_obj_set_style_text_color(lblSettingsRow, sel ? lv_palette_main(LV_PALETTE_YELLOW) : lv_color_white(), 0);
   lv_label_set_text(lblSettingsRow, sel ? "> WiFi telechargement" : "  WiFi telechargement");
+
+  char buf[32];
+  if (lapFreezeS == 0) snprintf(buf, sizeof(buf), "  Temps de pose: desactive");
+  else snprintf(buf, sizeof(buf), "  Temps de pose: %ds", lapFreezeS);
+  lv_label_set_text(lblFreezeRow, buf);
 }
 
 // ===================== Ecran WiFi =====================
@@ -1850,6 +1908,8 @@ void setup() {
   if (!LittleFS.begin(true)) {
     Serial.println("LittleFS: echec de montage (meme apres formatage) -- circuits/sessions indisponibles.");
   }
+  loadDisplaySettings();
+  Serial.printf("Reglages : temps de pose = %ds.\n", lapFreezeS);
   bool sdOk = initSdLogStorage();
   Serial.printf("SD (SDMMC) : %s -- logs GPS detailles sur %s.\n", sdOk ? "montee" : "absente/en panne", sdOk ? "carte SD" : "LittleFS (repli)");
   migrateLittleFsLogsToSd();

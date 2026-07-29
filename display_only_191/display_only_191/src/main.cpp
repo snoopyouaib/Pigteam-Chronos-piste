@@ -230,10 +230,14 @@ static unsigned long randomLapDurationMs() { return (unsigned long)random(8000, 
 static const unsigned long SIM_PADDOCK_DELAY_MS = 6000UL;
 
 // Fige l'affichage du chrono sur le temps du tour qui vient de se
-// terminer pendant LAP_DISPLAY_FREEZE_MS, comme au reel -- cf.
-// commentaire equivalent dans chrono-AMOLED/src/main.cpp.
+// terminer pendant lapFreezeS secondes, comme au reel -- reglable
+// depuis Reglages (tap sur la ligne, cycle parmi FREEZE_PRESETS_S).
+// Contrairement au reel, pas de persistance LittleFS ici (banc
+// entierement en RAM) -- revient a 10s par defaut a chaque reboot.
 static unsigned long lapFreezeUntilMs = 0;
-static const unsigned long LAP_DISPLAY_FREEZE_MS = 10000UL;
+static int lapFreezeS = 10;
+static const int FREEZE_PRESETS_S[] = { 0, 5, 10, 15, 20, 30 };
+static const int FREEZE_PRESETS_COUNT = 6;
 
 static void getDisplayState(unsigned long& currentLapMs, unsigned long& bestLapMs, bool& hasBest, int& lapsCount) {
   currentLapMs = (recordingEnabled && millis() >= simLapStartMs) ? (millis() - simLapStartMs) : 0;
@@ -284,7 +288,7 @@ static void checkLapCompletion() {
   simLastLapMs = elapsed;
   if (simLastLapMs < simBestLapMs) simBestLapMs = simLastLapMs;
   simLapsCount++;
-  lapFreezeUntilMs = millis() + LAP_DISPLAY_FREEZE_MS;
+  lapFreezeUntilMs = millis() + (unsigned long)lapFreezeS * 1000UL;
 
   if (!simSessions.empty()) {
     SessionSummary& s = simSessions.back();
@@ -934,11 +938,22 @@ static void refreshSessionLapsScreen() {
 // ===================== Ecran Reglages =====================
 
 static lv_obj_t* lblSettingsRow;
+static lv_obj_t* lblFreezeRow;
 
 static void settingsRowTappedCb(lv_event_t* e) {
   selectingMode = false;
   wifiStartRequested = true; // traite dans loop(), pas ici (cf. commentaire pres de la declaration)
   goToScreen(SCR_WIFI); // tap direct = ouvre WiFi en un seul geste
+}
+
+// Cycle parmi FREEZE_PRESETS_S a chaque tap (0/5/10/15/20/30s, boucle).
+static void refreshSettingsScreen();
+static void freezeRowTappedCb(lv_event_t* e) {
+  int idx = 0;
+  for (int i = 0; i < FREEZE_PRESETS_COUNT; i++) if (FREEZE_PRESETS_S[i] == lapFreezeS) { idx = i; break; }
+  idx = (idx + 1) % FREEZE_PRESETS_COUNT;
+  lapFreezeS = FREEZE_PRESETS_S[idx];
+  refreshSettingsScreen();
 }
 
 static void buildSettingsScreen() {
@@ -953,12 +968,24 @@ static void buildSettingsScreen() {
   lv_obj_set_style_bg_color(lblSettingsRow, lv_palette_main(LV_PALETTE_YELLOW), LV_STATE_PRESSED);
   lv_obj_set_style_text_color(lblSettingsRow, lv_color_black(), LV_STATE_PRESSED);
   lv_obj_add_event_cb(lblSettingsRow, settingsRowTappedCb, LV_EVENT_CLICKED, NULL);
+
+  lblFreezeRow = createListRow(scrSettings, 140);
+  lv_obj_add_flag(lblFreezeRow, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_style_bg_opa(lblFreezeRow, LV_OPA_COVER, LV_STATE_PRESSED);
+  lv_obj_set_style_bg_color(lblFreezeRow, lv_palette_main(LV_PALETTE_YELLOW), LV_STATE_PRESSED);
+  lv_obj_set_style_text_color(lblFreezeRow, lv_color_black(), LV_STATE_PRESSED);
+  lv_obj_add_event_cb(lblFreezeRow, freezeRowTappedCb, LV_EVENT_CLICKED, NULL);
 }
 
 static void refreshSettingsScreen() {
   bool sel = selectingMode;
   lv_obj_set_style_text_color(lblSettingsRow, sel ? lv_palette_main(LV_PALETTE_YELLOW) : lv_color_white(), 0);
   lv_label_set_text(lblSettingsRow, sel ? "> WiFi telechargement" : "  WiFi telechargement");
+
+  char buf[32];
+  if (lapFreezeS == 0) snprintf(buf, sizeof(buf), "  Temps de pose: desactive");
+  else snprintf(buf, sizeof(buf), "  Temps de pose: %ds", lapFreezeS);
+  lv_label_set_text(lblFreezeRow, buf);
 }
 
 // ===================== Ecran WiFi =====================
