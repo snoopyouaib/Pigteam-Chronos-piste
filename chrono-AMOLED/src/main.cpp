@@ -1324,6 +1324,7 @@ static lv_obj_t* lblBig;
 static lv_obj_t* lblClock;
 static lv_obj_t* lblRecHint; // "PRESS REC", cf. commentaire pres de sa creation
 static lv_obj_t* lblDernier;
+static lv_obj_t* lblRouteChrono; // mode Route uniquement -- meme taille/style que lblClock, en face (BOTTOM_RIGHT)
 static lv_obj_t* lblBest;
 static lv_obj_t* lblTours;
 
@@ -1354,6 +1355,11 @@ static void buildStatusScreen() {
   lblClock = lv_label_create(scrStatus);
   lv_obj_set_style_text_font(lblClock, &lv_font_teko_bold_56, 0); // taille intermediaire (etait bold_84, trop gros)
   lv_obj_set_style_text_color(lblClock, lv_color_white(), 0);
+
+  lblRouteChrono = lv_label_create(scrStatus);
+  lv_obj_set_style_text_font(lblRouteChrono, &lv_font_teko_bold_56, 0); // meme taille que lblClock
+  lv_obj_set_style_text_color(lblRouteChrono, lv_color_white(), 0);
+  lv_obj_add_flag(lblRouteChrono, LV_OBJ_FLAG_HIDDEN); // mode Route uniquement, cf. updateStatusScreen()
 
   // Tactile retire (28/07, soir) -- theorie confirmee par un test dedie :
   // 2 redemarrages fantomes avec la trace "[trigger] REC via tactile" en
@@ -1460,6 +1466,7 @@ static void updateStatusScreen(unsigned long nowMs) {
   getDisplayState(currentLapMs, bestLapMs, hasBest, lapsCount);
 
   if (!recordingEnabled) {
+    lv_obj_add_flag(lblRouteChrono, LV_OBJ_FLAG_HIDDEN); // au cas ou on vient de quitter le mode Route
     snprintf(buf, sizeof(buf), "%d km/h", (int)gpsSpeedKmh);
     lv_label_set_text(lblBig, buf);
     lv_obj_align(lblBig, LV_ALIGN_TOP_MID, 0, 40);
@@ -1488,24 +1495,33 @@ static void updateStatusScreen(unsigned long nowMs) {
 
   } else if (routeMode) {
     // Mode Route : vitesse en gros comme avant REC (plus utile en
-    // continu qu'un chrono qui defile), chrono du parcours (duree
-    // ecoulee depuis le depart, ne repart jamais a zero) en dessous, a
-    // la place de "Dernier". Best/Tours toujours masques (aucun sens
-    // sans notion de tour).
+    // continu qu'un chrono qui defile), heure conservee a sa place
+    // habituelle (comme avant REC), chrono du parcours ajoute en face
+    // (BOTTOM_RIGHT, meme taille) -- duree ecoulee depuis le depart, ne
+    // repart jamais a zero. Dernier/Best/Tours toujours masques (aucun
+    // sens sans notion de tour).
     snprintf(buf, sizeof(buf), "%d km/h", (int)gpsSpeedKmh);
     lv_label_set_text(lblBig, buf);
     lv_obj_align(lblBig, LV_ALIGN_TOP_MID, 0, 40);
 
-    formatLapTime(currentLapMs, buf, sizeof(buf));
-    lv_label_set_text(lblDernier, buf);
-    lv_obj_clear_flag(lblDernier, LV_OBJ_FLAG_HIDDEN);
+    char timeBuf[10];
+    getLocalDateTime(nullptr, 0, timeBuf, sizeof(timeBuf));
+    lv_label_set_text(lblClock, timeBuf);
+    lv_obj_align(lblClock, LV_ALIGN_BOTTOM_LEFT, 4, -4);
+    lv_obj_clear_flag(lblClock, LV_OBJ_FLAG_HIDDEN);
 
+    formatLapTime(currentLapMs, buf, sizeof(buf));
+    lv_label_set_text(lblRouteChrono, buf);
+    lv_obj_align(lblRouteChrono, LV_ALIGN_BOTTOM_RIGHT, -4, -4);
+    lv_obj_clear_flag(lblRouteChrono, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_add_flag(lblDernier, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(lblBest, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(lblTours, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(lblClock, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(lblRecHint, LV_OBJ_FLAG_HIDDEN);
 
   } else {
+    lv_obj_add_flag(lblRouteChrono, LV_OBJ_FLAG_HIDDEN); // hors mode Route -- au cas ou on vient d'en sortir
     if (millis() < lapFreezeUntilMs) {
       // Tour vient de se terminer -- affiche encore son temps fige,
       // plutot que de reafficher direct le chrono du tour suivant.
