@@ -93,7 +93,8 @@ type `REC via tactile` déclenchées sans aucun contact humain, boîtier
 immobile). Reproductible à volonté, y compris après correction du bug
 n°1 -- donc bien une cause matérielle distincte, pas juste un symptôme
 du même bug. **Le rotatif EC11 a été physiquement retiré et remplacé
-par un simple bouton poussoir** (même broche, GPIO10) ; le tactile a
+par un simple bouton poussoir** (même broche à l'origine, GPIO10 --
+déplacé depuis, cf. section "Brochage boutons" plus bas) ; le tactile a
 été retiré de tout le chemin REC/pause/reprise (plus aucun widget
 cliquable sur l'écran Statut ni sur l'écran de confirmation -- juste du
 texte, "PRESS REC" / "PUSH pour reprendre" / "BACK pour arreter", ces
@@ -231,6 +232,122 @@ pour ne compter qu'une fois un evenement soutenu.
   plus ancienne). Toujours pas d'affichage ecran physique (meme
   principe que l'angle en continu : pas le temps de regarder un ecran
   en pleine inclinaison).
+
+## Mode Route -- parcours libre sans détection de tour (29/07)
+
+Nouvelle ligne "Mode Route" dans Réglages (toggle par tap, ON/OFF) pour
+enregistrer n'importe quel trajet sans notion de circuit -- balade à
+vélo, trajet en voiture. GPS/vitesse/distance/IMU (angle, wheelie/
+stoppie) toujours enregistrés en continu, mais **aucune détection de
+tour** : pas de ligne de départ-arrivée, pas de geofencing, pas de
+`CourseManager` engagé.
+
+- **PAS PERSISTÉ** (contrairement à "Pause chrono") : revient toujours
+  à OFF au démarrage -- mode explicite à réactiver à chaque usage, par
+  sécurité (pas de risque d'oublier le chrono "bloqué" en mode Route
+  après une balade).
+- **"Route" affiché à la place du nom de circuit** partout où celui-ci
+  apparaît (écran Statut, Connexion, logs).
+- **Écran Statut adapté** : le gros chrono devient un simple
+  chronomètre (durée écoulée depuis le départ, ne repart jamais à
+  zéro), "Dernier/Best/Tours" masqués (aucun sens sans tours).
+- **`/sessions.csv`** : une seule ligne "Route" écrite à l'arrêt
+  définitif (pas à chaque pause), avec les mêmes statistiques que pour
+  un tour de circuit (Vmax/Vmin/Vmoy/distance/départ/wheelie-stoppie/
+  angle max) accumulées sur tout le trajet -- `lap_number` fixé à 1,
+  `best_lap_time` = `lap_time` (pas de notion de "meilleur" sur un
+  parcours unique).
+- **Toggle bloqué pendant un enregistrement** : changer de mode en
+  plein REC laisserait les accumulateurs de stats dans un état
+  incohérent (déjà utilisés pour un circuit, plus pour une route, ou
+  l'inverse) -- il faut arrêter avant de basculer.
+- Réutilise entièrement les contrôles REC/pause/arrêt existants (PUSH/
+  BACK, écran de confirmation) -- aucune nouvelle interaction à
+  apprendre, seule la détection de tour est désactivée.
+- **Bug corrige : session Route invisible sur le webserver** (meme
+  jour, trouve en testant l'ajout des noms de circuit) :
+  `finalizeRouteSessionIfNeeded()` n'etait appelee qu'a la confirmation
+  d'arret definitif (`SCR_CONFIRM_STOP`), qui intervient APRES que
+  `stopRecording()` ait deja ecrit le marqueur `# session arretee` --
+  la ligne "Route" atterrissait donc EN DEHORS du bloc demarree/arretee
+  que `loadSessionSummaries()` utilise pour rattacher les tours a une
+  session, et etait completement ignoree (`lapCount` reste a 0) : ni
+  "Route", ni nom de circuit, ni lien de detail n'apparaissaient nulle
+  part sur le webserver. Fix : appel deplace au tout debut de
+  `stopRecording()` lui-meme, avant l'ecriture du marqueur. Consequence
+  du deplacement (`stopRecording()` sert aussi de pause) : si Route est
+  mis en pause puis repris plusieurs fois avant l'arret definitif,
+  chaque segment ecrit desormais sa propre ligne "Route" au lieu d'une
+  seule pour tout le trajet -- pas une perte par rapport a avant (les
+  donnees etaient deja perdues/invisibles), juste rendu visible.
+  `SessionSummaryLite` retient desormais aussi le nom de circuit de la
+  session (`isRouteSummary()`, detection par `circuit == "Route"`) --
+  la carte d'accueil et la liste `/debug` affichent "Route -- duree
+  XX:XX.XXX" au lieu de "N tour(s) -- meilleur : ...". Sur la page
+  `/lap`, meme detection en 1ere passe (scalaire, avant le titre) :
+  titre "Detail du parcours (mode Route)", colonnes Tour/Diff/Circuit
+  masquees (sans objet -- une seule ligne, pas de classement, circuit
+  toujours "Route"), seule la Duree reste en 1ere colonne suivie de
+  Depart/Distance/V.max/V.min/V.moy/Wheelie/Stoppie/Angle D/Angle G,
+  identiques a un tour de circuit.
+- **Nom de circuit affiche sur chaque session** (accueil + `/debug`,
+  meme jour) : la carte d'une session circuit affiche desormais
+  "N tour(s) -- meilleur : TIME -- NomDuCircuit". Pour une session
+  Route, le resume s'enrichit de la distance et de la V.moy totales
+  ("Route -- duree TIME -- X.XX km -- V.moy XX km/h") -- possible
+  directement car une session Route n'a qu'UNE seule ligne dans
+  `/sessions.csv` (le total du trajet). Pour une session multi-tours,
+  distance/V.moy ne sont PAS affichees a ce niveau resume : la derniere
+  ligne lue par `loadSessionSummaries()` ne serait que le dernier tour,
+  pas un cumul sur toute la session -- afficher ca aurait ete trompeur.
+  Toujours accessible via le detail complet tour par tour (`/lap`).
+
+- **Timeout automatique de l'écran de pause supprimé** : "Enregistrement
+  en pause" (BACK pendant le REC) restait auparavant armé au maximum
+  5 minutes avant de confirmer l'arrêt tout seul (filet de sécurité en
+  cas d'oubli). Retiré -- l'écran reste maintenant armé indéfiniment
+  tant que PUSH (reprendre) ou BACK (arrêter) n'est pas pressé. Devient
+  vraiment utile avec le **mode Route** (pause volontaire en cours de
+  trajet, ex. un arrêt café, sans limite de temps à respecter). La
+  garde anti-faux-contact de 600ms à l'entrée de l'écran est conservée
+  (mécanisme distinct, protège contre un rebond tactile/mécanique
+  immédiat, pas contre un oubli prolongé).
+
+- **Timeout automatique de l'écran de pause supprimé** : "Enregistrement
+  en pause" (BACK pendant le REC) restait auparavant armé au maximum
+  5 minutes avant de confirmer l'arrêt tout seul (filet de sécurité en
+  cas d'oubli). Retiré -- l'écran reste maintenant armé indéfiniment
+  tant que PUSH (reprendre) ou BACK (arrêter) n'est pas pressé. Devient
+  vraiment utile avec le **mode Route** (pause volontaire en cours de
+  trajet, ex. un arrêt café, sans limite de temps à respecter). La
+  garde anti-faux-contact de 600ms à l'entrée de l'écran est conservée
+  (mécanisme distinct, protège contre un rebond tactile/mécanique
+  immédiat, pas contre un oubli prolongé).
+
+## Brochage boutons -- déplacé du GPIO10/14 (29/07)
+
+PUSH et BACK ont été déplacés sur d'autres broches pour des raisons
+pratiques de soudure (accès plus facile en bord de carte) :
+
+| Bouton | Broche d'origine | Broche actuelle |
+|---|---|---|
+| PUSH | GPIO10 | **GPIO16** |
+| BACK | GPIO14 | **GPIO3** (via GPIO2, erreur de soudure) |
+
+Vérifiés sans conflit avec le reste du brochage du firmware (écran
+QSPI : 5/6/7/17/18/47/48, I2C partagé tactile+IMU : 39/40, GPS UART :
+43/44, SD SDMMC : 8/9/42, batterie ADC : 1). GPIO16 n'est pas une
+broche de strapping. **GPIO3 en est une** (avec 0/45/46 sur
+l'ESP32-S3) -- rôle : source JTAG au démarrage, sans impact sur le
+fonctionnement normal du chrono (au pire, bouton maintenu appuyé pile
+à la mise sous tension change juste la source de débogage JTAG).
+GPIO17 avait été envisagé pour PUSH mais écarté : déjà utilisé comme
+reset de l'écran (`EXAMPLE_PIN_NUM_LCD_RST`).
+
+Alimentation : VBUS (5V USB, présent uniquement câble branché) écarté
+au profit de VSYS (alimentation système, toujours présente batterie ou
+USB) pour un point de soudure mieux placé en bord de carte -- sans
+lien avec les boutons, notée ici pour mémoire.
 
 ## Nouveautés du 29/07
 

@@ -258,7 +258,67 @@ struct SessionSummaryLite {
   String compactKey; // "AAAAMMJJHHMMSS", sans separateurs -- cle de correspondance
   int lapCount = 0;
   String bestLapTime = "--:--.---";
+  String circuit;    // nom du circuit de la 1ere ligne rencontree -- "Route" pour le mode Route (cf. finalizeRouteSessionIfNeeded() dans main.cpp)
+  // Distance/V.moy de la DERNIERE ligne lue -- n'a de sens comme total
+  // de session que pour le mode Route (une seule ligne). Pour une
+  // session multi-tours, ce ne serait que le dernier tour, pas un total
+  // cumule -- a ne jamais afficher hors du cas Route cote appelant.
+  String lastDistanceKm;
+  String lastAvgSpeedKmh;
 };
+
+static bool isRouteSummary(const SessionSummaryLite& s) { return s.circuit == "Route"; }
+
+// Compte les lignes de donnees presentes HORS de tout bloc "# session
+// demarree"/"# session arretee" -- ne devrait normalement jamais
+// arriver, mais peut se produire si finalizeRouteSessionIfNeeded() (ou
+// tout autre code d'ecriture) tourne alors qu'aucune session n'est
+// ouverte (cf. bug d'ordre d'ecriture corrige le 29/07 -- ce compteur
+// sert justement a detecter s'il en reste d'anciennes, ecrites avant
+// le fix). Scalaire uniquement (un entier), meme profil memoire que
+// loadSessionSummaries().
+static int countOrphanSessionLines() {
+  File f = LittleFS.open(g_sessionLogPath, "r");
+  if (!f) return 0;
+  int count = 0;
+  bool inBlock = false;
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.length() == 0 || line.startsWith("date,")) continue;
+    if (line.startsWith("# session demarree")) { inBlock = true; continue; }
+    if (line.startsWith("# session arretee")) { inBlock = false; continue; }
+    if (!inBlock) count++;
+  }
+  f.close();
+  return count;
+}
+
+// Retire du carnet toutes les lignes de donnees orphelines (hors de
+// tout bloc demarree/arretee), sans toucher aux blocs eux-memes ni a
+// leurs marqueurs -- symetrique de pruneSessionFromCarnet() (qui vise
+// UN bloc precis par sa cle), ici on vise au contraire tout ce qui n'a
+// PAS de bloc du tout.
+static void stripOrphanSessionLines() {
+  File f = LittleFS.open(g_sessionLogPath, "r");
+  if (!f) return;
+  std::vector<String> keptLines;
+  bool inBlock = false;
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.length() == 0) continue;
+    if (line.startsWith("# session demarree")) { inBlock = true; keptLines.push_back(line); continue; }
+    if (line.startsWith("# session arretee")) { inBlock = false; keptLines.push_back(line); continue; }
+    if (inBlock) keptLines.push_back(line); // sinon (orpheline) -- pas conservee
+  }
+  f.close();
+
+  File out = LittleFS.open(g_sessionLogPath, "w");
+  if (!out) return;
+  for (const String& l : keptLines) out.println(l);
+  out.close();
+}
 
 static String stripSeparators(const String& s) {
   String out;
@@ -291,14 +351,22 @@ static std::vector<SessionSummaryLite> loadSessionSummaries() {
     if (line.startsWith("# session arretee")) { current = nullptr; continue; }
     if (!current) continue;
 
-    // Format : date,heure,numero_tour,temps_tour,meilleur_temps,circuit
-    int commaIdx[5], found = 0, start = 0;
-    for (size_t i = 0; i < line.length() && found < 5; i++) {
+    // Format : date,heure,numero_tour,temps_tour,meilleur_temps,circuit[,vmax,vmin,vavg,distance,...]
+    int commaIdx[10], found = 0, start = 0;
+    for (size_t i = 0; i < line.length() && found < 10; i++) {
       if (line[i] == ',') { commaIdx[found++] = (int)i; }
     }
-    if (found == 5) {
+    if (found >= 5) {
       current->lapCount++;
       current->bestLapTime = line.substring(commaIdx[3] + 1, commaIdx[4]);
+      // Circuit : jusqu'a la 6e virgule si des champs supplementaires
+      // suivent (vmax/vmin/... -- format actuel), sinon jusqu'a la fin
+      // de la ligne (anciennes sessions a 6 champs, sans virgule finale).
+      current->circuit = (found >= 6) ? line.substring(commaIdx[4] + 1, commaIdx[5]) : line.substring(commaIdx[4] + 1);
+      if (found >= 10) {
+        current->lastAvgSpeedKmh = line.substring(commaIdx[7] + 1, commaIdx[8]);
+        current->lastDistanceKm = line.substring(commaIdx[8] + 1, commaIdx[9]);
+      }
     }
   }
   f.close();
@@ -950,8 +1018,18 @@ static void handleHomePage() {
       html += "<div class='card' style='display:block'><div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px'><div>";
       html += "<b>" + prettyTime(timeCompact6) + "</b>";
       html += "<div class='meta'>";
-      if (summary.lapCount > 0) html += String(summary.lapCount) + " tour(s) -- meilleur : " + summary.bestLapTime;
-      else html += "(pas de resume disponible)";
+      if (summary.lapCount > 0) {
+        if (isRouteSummary(summary)) {
+          html += "Route -- duree " + summary.bestLapTime;
+          if (summary.lastDistanceKm.length()) html += " -- " + summary.lastDistanceKm + " km";
+          if (summary.lastAvgSpeedKmh.length()) html += " -- V.moy " + summary.lastAvgSpeedKmh + " km/h";
+        } else {
+          html += String(summary.lapCount) + " tour(s) -- meilleur : " + summary.bestLapTime;
+          if (summary.circuit.length()) html += " -- " + summary.circuit;
+        }
+      } else {
+        html += "(pas de resume disponible)";
+      }
       html += " -- " + String(files[i].second) + " octets</div></div>";
       html += "<div style='display:flex;gap:8px'>";
       html += "<a class='file' href='/download?file=" + shortName + "'>Telecharger</a>";
@@ -975,7 +1053,8 @@ static void handleHomePage() {
       // loadLapsForSession() (cf. cette fonction) pour la session
       // precise qui declenchait le bug memoire non resolu.
       if (summary.lapCount > 0) {
-        html += "<p style='margin-top:8px'><a class='file' href='/lap?file=" + shortName + "&lap=1'>Voir le detail des tours &rarr;</a></p>";
+        String linkLabel = isRouteSummary(summary) ? "Voir le detail du parcours &rarr;" : "Voir le detail des tours &rarr;";
+        html += "<p style='margin-top:8px'><a class='file' href='/lap?file=" + shortName + "&lap=1'>" + linkLabel + "</a></p>";
       }
 
       html += "</div>";
@@ -1098,8 +1177,11 @@ static void handleLapTracePage() {
   // page et couper court a tout risque residuel lie a ce pattern.
   String compactKey = compactKeyFromLogFilename("/" + file);
 
-  // ----- Passe 1 : meilleur temps de la session (scalaire uniquement) -----
+  // ----- Passe 1 : meilleur temps de la session + detection Route -----
+  // (scalaire uniquement -- un "long bestMs" et un "bool isRoute", pas
+  // de conteneur)
   long bestMs = -1;
+  bool isRoute = false;
   {
     File fb = LittleFS.open(g_sessionLogPath, "r");
     if (fb) {
@@ -1116,11 +1198,13 @@ static void handleLapTracePage() {
         if (line.startsWith("# session arretee")) { inTarget = false; continue; }
         if (!inTarget) continue;
 
-        int commaIdx[5], found = 0;
-        for (int i = 0; i < (int)line.length() && found < 5; i++) if (line[i] == ',') commaIdx[found++] = i;
-        if (found == 5) {
+        int commaIdx[6], found = 0;
+        for (int i = 0; i < (int)line.length() && found < 6; i++) if (line[i] == ',') commaIdx[found++] = i;
+        if (found >= 5) {
           long ms = lapTimeToMsSimple(line.substring(commaIdx[2] + 1, commaIdx[3]));
           if (ms >= 0 && (bestMs < 0 || ms < bestMs)) bestMs = ms;
+          String circuit = (found >= 6) ? line.substring(commaIdx[4] + 1, commaIdx[5]) : line.substring(commaIdx[4] + 1);
+          if (circuit == "Route") isRoute = true;
         }
       }
       fb.close();
@@ -1128,7 +1212,7 @@ static void handleLapTracePage() {
   }
 
   String html = pageHeader("home");
-  html += "<h2>Tours de la session</h2>";
+  html += isRoute ? "<h2>Detail du parcours (mode Route)</h2>" : "<h2>Tours de la session</h2>";
   html += "<p class='meta' style='opacity:0.75'>" + compareFileLabel(file) + " -- <a class='file' href='/'>&larr; retour aux sessions</a></p>";
 
   httpServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
@@ -1139,12 +1223,17 @@ static void handleLapTracePage() {
   html += "<div style='overflow-x:auto'>";
   html += "<table style='width:100%;border-collapse:collapse;margin-top:8px;font-size:13px;white-space:nowrap'>";
   html += "<tr style='opacity:0.7;text-align:left'>";
-  html += "<th style='padding:4px 8px'>Tour</th><th style='padding:4px 8px'>Temps</th><th style='padding:4px 8px'>Diff</th>";
+  if (isRoute) {
+    html += "<th style='padding:4px 8px'>Duree</th>";
+  } else {
+    html += "<th style='padding:4px 8px'>Tour</th><th style='padding:4px 8px'>Temps</th><th style='padding:4px 8px'>Diff</th>";
+  }
   html += "<th style='padding:4px 8px'>Depart tour</th><th style='padding:4px 8px'>Distance</th>";
   html += "<th style='padding:4px 8px'>V.max</th><th style='padding:4px 8px'>V.min</th><th style='padding:4px 8px'>V.moy</th>";
   html += "<th style='padding:4px 8px'>Wheelie</th><th style='padding:4px 8px'>Stoppie</th>";
   html += "<th style='padding:4px 8px'>Angle D</th><th style='padding:4px 8px'>Angle G</th>";
-  html += "<th style='padding:4px 8px'>Circuit</th></tr>";
+  if (!isRoute) html += "<th style='padding:4px 8px'>Circuit</th>";
+  html += "</tr>";
   httpServer.sendContent(html);
   html = "";
 
@@ -1188,9 +1277,13 @@ static void handleLapTracePage() {
         bool hasAngles = (idx >= 15);   // + angle max droite/gauche
 
         String row = isBest ? "<tr style='background:#1d3a5c'>" : "<tr>";
-        row += "<td style='padding:4px 8px'>" + n + "</td>";
-        row += "<td style='padding:4px 8px'><b>" + fld[3] + "</b></td>";
-        row += "<td style='padding:4px 8px'>" + diffText + "</td>";
+        if (isRoute) {
+          row += "<td style='padding:4px 8px'><b>" + fld[3] + "</b></td>";
+        } else {
+          row += "<td style='padding:4px 8px'>" + n + "</td>";
+          row += "<td style='padding:4px 8px'><b>" + fld[3] + "</b></td>";
+          row += "<td style='padding:4px 8px'>" + diffText + "</td>";
+        }
         if (hasExtended) {
           row += "<td style='padding:4px 8px'>" + fld[10] + "</td>";
           row += "<td style='padding:4px 8px'>" + (fld[9].length() ? fld[9] + " km" : "--") + "</td>";
@@ -1212,7 +1305,8 @@ static void handleLapTracePage() {
         row += "<td style='padding:4px 8px'>" + (hasWheelie ? fld[12] : "--") + "</td>";
         row += "<td style='padding:4px 8px'>" + (hasAngles && fld[13].length() ? fld[13] + "&deg;" : "--") + "</td>";
         row += "<td style='padding:4px 8px'>" + (hasAngles && fld[14].length() ? fld[14] + "&deg;" : "--") + "</td>";
-        row += "<td style='padding:4px 8px'>" + fld[5] + "</td></tr>";
+        if (!isRoute) row += "<td style='padding:4px 8px'>" + fld[5] + "</td>";
+        row += "</tr>";
         httpServer.sendContent(row); // une ligne a la fois -- jamais accumulee
       }
     }
@@ -1220,7 +1314,7 @@ static void handleLapTracePage() {
   }
 
   html = "</table></div>";
-  if (!anyLap) html += "<p><i>Aucun tour trouve pour cette session.</i></p>";
+  if (!anyLap) html += isRoute ? "<p><i>Aucune donnee trouvee pour ce parcours.</i></p>" : "<p><i>Aucun tour trouve pour cette session.</i></p>";
   html += "<p style='margin-top:12px'><a class='file' href='/download?file=" + file + "'>&#8681; Telecharger le CSV complet de la session</a></p>";
   httpServer.sendContent(html);
   html = "";
@@ -1284,6 +1378,23 @@ static void handleDebugPage() {
   html += "<button type='submit' style='background:#b62324'>Vider tout le carnet de session</button>";
   html += "</form>";
 
+  // ----- Lignes orphelines (hors de tout bloc demarree/arretee) -----
+  // Ne devrait normalement pas arriver -- symptome d'un bug d'ecriture
+  // passe (cf. commentaire de countOrphanSessionLines()) plutot qu'un
+  // etat normal. N'apparaissent PAS dans la liste "Sessions du carnet"
+  // ci-dessous (elle vient de loadSessionSummaries(), qui ne les voit
+  // pas non plus faute de marqueur) -- sans ce bouton dedie, aucun
+  // moyen de les retirer depuis le webserver.
+  int orphanCount = countOrphanSessionLines();
+  if (orphanCount > 0) {
+    html += "<div class='card' style='display:block;font-size:13px;margin-top:12px'>";
+    html += String(orphanCount) + " ligne(s) orpheline(s) trouvee(s) dans le carnet (hors de tout bloc session -- ";
+    html += "ne peuvent pas apparaitre dans la liste ci-dessous ni etre selectionnees individuellement).</div>";
+    html += "<form action='/debug/strip-orphans' method='GET' onsubmit=\"return confirm('Retirer les " + String(orphanCount) + " ligne(s) orpheline(s) du carnet ? Irreversible -- les sessions normales ne sont pas affectees.');\">";
+    html += "<button type='submit' style='background:#b62324'>Retirer les lignes orphelines</button>";
+    html += "</form>";
+  }
+
   // ----- Fichier /croix_replay.csv (mode exemple, retire du firmware) -----
   // uploadfs (USB) reecrit toute l'image LittleFS d'un coup et efface
   // donc ce fichier avec elle, mais tant que l'USB n'est pas dispo (OTA
@@ -1341,7 +1452,10 @@ static void handleDebugPage() {
       html += "<label style='display:flex;align-items:center;gap:12px;cursor:pointer;width:100%'>";
       html += "<input type='checkbox' name='keys' value='" + s.compactKey + "' style='width:18px;height:18px;flex-shrink:0'>";
       html += "<div><b>" + label + "</b>";
-      html += "<div class='meta'>" + String(s.lapCount) + " tour(s) -- meilleur : " + s.bestLapTime;
+      String debugMeta = isRouteSummary(s)
+        ? ("Route -- duree " + s.bestLapTime + (s.lastDistanceKm.length() ? (" -- " + s.lastDistanceKm + " km") : ""))
+        : (String(s.lapCount) + " tour(s) -- meilleur : " + s.bestLapTime + (s.circuit.length() ? (" -- " + s.circuit) : ""));
+      html += "<div class='meta'>" + debugMeta;
       if (!logFileExists) html += " -- <span style='color:#ff9d9d'>orpheline (log GPS deja supprime)</span>";
       html += "</div></div>";
       html += "</label>";
@@ -1389,6 +1503,13 @@ static void handleDebugDeleteFile() {
 // retrouvait avec le bloc du carnet propre mais le fichier GPS detaille
 // (souvent le plus gros, cf. octets affiches sur la page Sessions) qui
 // trainait toujours sur la LittleFS.
+static void handleDebugStripOrphans() {
+  int before = countOrphanSessionLines();
+  stripOrphanSessionLines();
+  String message = (before > 0) ? (String(before) + " ligne(s) orpheline(s) retiree(s) du carnet") : "Aucune ligne orpheline trouvee";
+  restartToApplyChange("home", message);
+}
+
 static void handleDebugDeleteSessions() {
   int removed = 0;
   int n = httpServer.args();
@@ -2473,6 +2594,7 @@ void WebServerManager::startDownloadMode() {
   httpServer.on("/debug", HTTP_GET, handleDebugPage);
   httpServer.on("/debug/clear-sessions", HTTP_GET, handleDebugClearSessions);
   httpServer.on("/debug/delete-sessions", HTTP_GET, handleDebugDeleteSessions);
+  httpServer.on("/debug/strip-orphans", HTTP_GET, handleDebugStripOrphans);
   httpServer.on("/debug/delete-file", HTTP_GET, handleDebugDeleteFile);
   httpServer.on("/import", HTTP_GET, handleImportPage);
   httpServer.on("/import/logs", HTTP_POST, handleImportLogsResult, handleImportLogsUpload);
