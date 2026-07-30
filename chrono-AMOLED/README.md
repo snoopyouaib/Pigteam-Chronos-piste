@@ -141,6 +141,19 @@ Petite série de retouches suite à la calibration sur le banc
 
 ## IMU (QMI8658) -- angle d'inclinaison en virage, log seul (29/07)
 
+**Calibration du biais gyro ajoutée (30/07)** suite à un test réel :
+sur PigTeam Track (circuit qui ne tourne qu'à droite), l'angle max
+"à gauche" ressortait significatif (26-32°) sur les 3 tours d'une
+session -- signature classique d'une dérive de gyroscope non corrigée
+(le filtre complémentaire fait confiance à 98% à l'intégration gyro ;
+même un petit biais au repos, quelques dixièmes de °/s, s'accumule
+linéairement et donne des dizaines de degrés de dérive sur un tour de
+~50s). Fix : `initImu()` calibre maintenant le biais des 3 axes gyro
+au démarrage (50 échantillons sur ~700ms, carte supposée immobile à la
+mise sous tension), et le retire de l'axe roulis (gyroZ) avant
+intégration. **Pas encore revalidé sur piste** -- prochain test à
+confirmer.
+
 Le board 1.91 a un accelerometre+gyroscope 6 axes (QMI8658) deja
 partage sur le meme bus I2C que le tactile FT3168 -- valide au
 bring-up (`README_AMOLED_bringup.md`, etape "02_I2C_QMI8658") mais

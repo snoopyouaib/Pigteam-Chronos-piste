@@ -41,6 +41,14 @@ static unsigned long lastImuTickMs = 0;
 static float lastAccelXmg = 0.0f, lastAccelYmg = 0.0f, lastAccelZmg = 0.0f;
 static float lastGyroXdps = 0.0f, lastGyroYdps = 0.0f, lastGyroZdps = 0.0f;
 
+// Biais du gyro au repos (deg/s), calibre une fois dans initImu() --
+// cf. commentaire pres de son calcul plus bas. Seul l'axe Z (roulis)
+// est corrige en pratique (utilise dans imuTick() ci-dessous) ; X/Y
+// calcules et affiches par completude/diagnostic mais pas encore
+// appliques ailleurs (tangage/lacet non recales pour l'instant, impact
+// negligeable face au seuil de 45 dps du wheelie/stoppie).
+static float gyroXBiasDps = 0.0f, gyroYBiasDps = 0.0f, gyroZBiasDps = 0.0f;
+
 // Frequence max d'echantillonnage/integration -- inutile de solliciter
 // l'I2C partage (tactile + IMU) plus vite que ca pour un angle destine
 // au log, pas a un affichage temps reel.
@@ -88,6 +96,37 @@ bool initImu() {
   I2C_write_buff(imuAddr, QMI8658_REG_CTRL3, &ctrl3, 1);
   I2C_write_buff(imuAddr, QMI8658_REG_CTRL7, &ctrl7, 1);
 
+  // Calibration du biais gyro (offset au repos) -- suppose la carte
+  // immobile au demarrage (mise sous tension avant de partir, comme le
+  // reste du firmware suppose deja pour d'autres capteurs). Sans ca,
+  // meme un petit biais constant (quelques dixiemes de deg/s, variable
+  // d'une puce a l'autre et avec la temperature) s'integre lineairement
+  // dans le temps -- sur un tour de ~50s, 0.5 dps de biais non corrige
+  // donne 25 degres de derive. Constate sur le terrain (29-30/07) :
+  // angle max "a gauche" significatif (26-32 deg) releve sur un circuit
+  // qui ne tourne qu'a droite -- exactement cette signature.
+  delay(200); // laisse le capteur se stabiliser apres l'activation des sensors (CTRL7)
+  const int calibSamples = 50;
+  double sumGx = 0, sumGy = 0, sumGz = 0;
+  int gotSamples = 0;
+  for (int i = 0; i < calibSamples; i++) {
+    uint8_t gbuf[6];
+    if (I2C_read_buff(imuAddr, QMI8658_REG_GYRO_XL, gbuf, 6) == 0) {
+      sumGx += rawWordLE(gbuf[0], gbuf[1]) * GYRO_DPS_PER_LSB;
+      sumGy += rawWordLE(gbuf[2], gbuf[3]) * GYRO_DPS_PER_LSB;
+      sumGz += rawWordLE(gbuf[4], gbuf[5]) * GYRO_DPS_PER_LSB;
+      gotSamples++;
+    }
+    delay(10);
+  }
+  if (gotSamples > 0) {
+    gyroXBiasDps = (float)(sumGx / gotSamples);
+    gyroYBiasDps = (float)(sumGy / gotSamples);
+    gyroZBiasDps = (float)(sumGz / gotSamples);
+  }
+  Serial.printf("IMU : biais gyro calibre (X=%.3f Y=%.3f Z=%.3f dps, %d echantillons) -- suppose la carte immobile au demarrage.\n",
+                gyroXBiasDps, gyroYBiasDps, gyroZBiasDps, gotSamples);
+
   lastImuTickMs = millis();
   Serial.printf("IMU QMI8658 : adresse 0x%02X, WHO_AM_I=0x%02X (attendu 0x05).\n", imuAddr, whoAmI);
   return true;
@@ -134,7 +173,7 @@ void imuTick() {
   // symetrie geometrique, pas encore teste physiquement (contrairement
   // au roulis) -- un wheelie/stoppie ne se simule pas a la main sur un
   // etabli comme le roulis, seul un vrai roulage le confirmera.
-  float gyroRollDps = gz;
+  float gyroRollDps = gz - gyroZBiasDps; // biais retire, cf. calibration dans initImu()
   float accelRollDeg = atan2f(ay, ax) * 180.0f / (float)M_PI;
 
   leanAngleDeg = COMPLEMENTARY_ALPHA * (leanAngleDeg + gyroRollDps * dtS)
