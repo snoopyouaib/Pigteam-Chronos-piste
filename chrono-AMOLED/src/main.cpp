@@ -60,7 +60,7 @@
 // pour les listes -- deja fonctionnel en parallele avant ce changement,
 // cf. ringScreenGestureCb() et les commentaires "Tap: choisir").
 #define PUSH_BUTTON   16  // etait GPIO10 -- deplace le 29/07 (GPIO16 libre, pas de strapping/PSRAM sur ESP32-S3)
-#define BACK_BUTTON   3  // etait GPIO14 puis GPIO2 -- deplace le 29/07 (erreur de soudure). GPIO3 = strapping JTAG sur ESP32-S3, sans impact sur le fonctionnement normal (juste la source JTAG si maintenu appuye pile au demarrage)
+#define BACK_BUTTON   2  // etait GPIO14 -- deplace le 29/07. Passe brievement par GPIO3 (erreur de soudure sur le 1er chrono) puis standardise sur GPIO2 pour tous les exemplaires (le 2eme chrono en cours de montage, resoude aussi le 1er) -- GPIO2 est libre et sans fonction de strapping sur l'ESP32-S3, contrairement a GPIO3 (source JTAG au demarrage, sans consequence pratique mais autant l'eviter quand on a le choix)
 
 volatile bool backButtonPressed = false;
 static unsigned long lastBackIsrMs = 0;

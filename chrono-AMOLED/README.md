@@ -337,30 +337,43 @@ tour** : pas de ligne de départ-arrivée, pas de geofencing, pas de
   (mécanisme distinct, protège contre un rebond tactile/mécanique
   immédiat, pas contre un oubli prolongé).
 
-## Brochage boutons -- déplacé du GPIO10/14 (29/07)
+## Brochage boutons -- déplacé du GPIO10/14, standardisé GPIO2 (29-30/07)
 
 PUSH et BACK ont été déplacés sur d'autres broches pour des raisons
-pratiques de soudure (accès plus facile en bord de carte) :
+pratiques de soudure (accès plus facile en bord de carte). Un 2e
+chrono identique est en cours de montage (même firmware, même
+matériel) -- **standardisé sur GPIO2** pour BACK sur les deux
+exemplaires (le 1er, d'abord soudé par erreur sur GPIO3, a été
+resoudé) :
 
 | Bouton | Broche d'origine | Broche actuelle |
 |---|---|---|
 | PUSH | GPIO10 | **GPIO16** |
-| BACK | GPIO14 | **GPIO3** (via GPIO2, erreur de soudure) |
+| BACK | GPIO14 | **GPIO2** |
 
 Vérifiés sans conflit avec le reste du brochage du firmware (écran
 QSPI : 5/6/7/17/18/47/48, I2C partagé tactile+IMU : 39/40, GPS UART :
-43/44, SD SDMMC : 8/9/42, batterie ADC : 1). GPIO16 n'est pas une
-broche de strapping. **GPIO3 en est une** (avec 0/45/46 sur
-l'ESP32-S3) -- rôle : source JTAG au démarrage, sans impact sur le
-fonctionnement normal du chrono (au pire, bouton maintenu appuyé pile
-à la mise sous tension change juste la source de débogage JTAG).
-GPIO17 avait été envisagé pour PUSH mais écarté : déjà utilisé comme
-reset de l'écran (`EXAMPLE_PIN_NUM_LCD_RST`).
+43/44, SD SDMMC : 8/9/42, batterie ADC : 1), et sans être des broches
+de strapping sur l'ESP32-S3 (celles-ci sont 0/3/45/46 -- GPIO3 avait
+été utilisé un temps par erreur de soudure sur le 1er chrono, sans
+conséquence pratique constatée mais écarté par principe au profit de
+GPIO2, qui n'a aucune fonction de strapping). GPIO17 avait été
+envisagé pour PUSH mais écarté : déjà utilisé comme reset de l'écran
+(`EXAMPLE_PIN_NUM_LCD_RST`).
 
 Alimentation : VBUS (5V USB, présent uniquement câble branché) écarté
 au profit de VSYS (alimentation système, toujours présente batterie ou
 USB) pour un point de soudure mieux placé en bord de carte -- sans
 lien avec les boutons, notée ici pour mémoire.
+
+**Piège annexe rencontré en assemblant le 2e chrono** : mêmes module
+GPS et fournisseur que le 1er, mais fils TX/RX inversés par rapport au
+premier exemplaire (câblage/connecteur pré-serti différent d'un lot à
+l'autre, le module lui-même n'a pas changé de convention). Réflexe à
+avoir sur tout futur exemplaire : si aucune trame NMEA ne sort au
+premier branchement, essayer l'inverse avant de chercher plus loin --
+ne pas supposer que le câblage du 1er exemplaire est transposable tel
+quel.
 
 ## Nouveautés du 29/07
 
