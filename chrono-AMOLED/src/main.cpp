@@ -2191,7 +2191,7 @@ void setup() {
   migrateLittleFsLogsToSd();
 
   loadActiveCircuitsIntoTracks();
-  courseManager = new CourseManager(myTracks, 7.0, &Serial);
+  courseManager = new CourseManager(myTracks, 10.0, &Serial); // etait 7.0 -- augmente le 01/08 suite a des franchissements manques a haute vitesse (Carole, ~130-200km/h, ligne pourtant large de 12.9m -- cf. README, section "Nouveautes du 01/08")
 
   webServerManager.begin("ChronoMotoAMOLED", SESSION_LOG_PATH, CIRCUITS_FILE_PATH, *gpsLogFs, nullptr, nullptr, flushLogsCallback, getStatusCallback);
 

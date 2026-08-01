@@ -375,6 +375,26 @@ premier branchement, essayer l'inverse avant de chercher plus loin --
 ne pas supposer que le câblage du 1er exemplaire est transposable tel
 quel.
 
+## Seuil de détection de ligne augmenté 7m -> 10m (01/08)
+
+Franchissement raté constaté sur Carole (session du 01/08, tour 1 =
+3:43 au lieu de ~1:11 -- en fait 3 vrais tours fusionnés, faute de
+détection sur les 2 premiers franchissements). Distance réelle
+mesurée à la ligne au moment des passages manqués : ~17-19m puis
+~10m -- au-dessus du seuil de 7m (`crossingThresholdMeters`,
+`main.cpp`, `new CourseManager(...)`) alors que la ligne de Carole est
+déjà large (12,9m, cf. tableau plus bas). **Cause identifiée : la
+vitesse**, pas la largeur de ligne -- à 130-200 km/h (36-55 m/s),
+même à 10Hz GPS le véhicule avance de 3,6 à 5,5m entre deux mesures,
+et sur un passage tangentiel (pas perpendiculaire à la ligne) le point
+le plus proche réel peut tomber entre deux échantillons sans jamais
+être mesuré sous le seuil. Même cause probable derrière le
+franchissement raté de PigTeam Track fin juillet (ligne élargie
+8m->10m à l'époque, cf. section dédiée plus bas -- corrige la
+symptomatologie sur ce circuit lent, mais le seuil lui-même restait
+sous-dimensionné pour un circuit rapide comme Carole). Seuil global
+passé à 10m -- s'applique à tous les circuits, pas seulement Carole.
+
 ## Nouveautés du 29/07
 
 - **Écran Connexion enrichi** : en plus de GPS et Circuit, affiche
