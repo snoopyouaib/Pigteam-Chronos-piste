@@ -63,6 +63,84 @@ static void configureOutputSentences() {
   sendPAIR("PAIR062,5,0"); delay(50); // VTG -- coupe, non parse
 }
 
+// ===================== Verification post-config (ACK + debit reel) =====================
+//
+// Ajoute suite au diagnostic du 04/08 : configureFixRate10Hz() envoyait
+// PAIR050,100 sans jamais verifier si le module l'acceptait. Les logs de
+// la session Carole du 01/08 montrent un delta constant de ~1000ms entre
+// fixes traites (donc 1Hz reel) malgre cette commande -- ce qui explique
+// probablement les franchissements de ligne rates a haute vitesse (~53m
+// entre deux mesures a 190km/h, bien plus large que la zone de detection
+// de la ligne). Les deux fonctions ci-dessous rendent ca visible au boot.
+
+// Lit une ligne NMEA/PAIR brute directement sur GPSSerial (hors pollGps(),
+// utilise uniquement pendant l'init). Retourne false si aucune ligne
+// complete n'est recue avant timeoutMs (ne renvoie jamais de ligne
+// partielle/tronquee).
+static bool readGpsLineBlocking(char* buf, size_t bufSize, unsigned long timeoutMs) {
+  unsigned long deadline = millis() + timeoutMs;
+  size_t idx = 0;
+  while ((long)(deadline - millis()) > 0) {
+    while (GPSSerial.available()) {
+      char c = (char)GPSSerial.read();
+      if (c == '\r') continue;
+      if (c == '\n') {
+        buf[idx] = '\0';
+        return idx > 0;
+      }
+      if (idx < bufSize - 1) buf[idx++] = c;
+    }
+  }
+  return false;
+}
+
+// Cherche l'ACK $PAIR001,050,<result>*hh (reponse a PAIR050) dans le flux,
+// pendant maxWaitMs. result='0' = commande acceptee par le module.
+static void confirmFixRateAck(unsigned long maxWaitMs) {
+  char line[96];
+  unsigned long deadline = millis() + maxWaitMs;
+  bool ackSeen = false;
+
+  while ((long)(deadline - millis()) > 0) {
+    if (!readGpsLineBlocking(line, sizeof(line), deadline - millis())) break;
+    if (strncmp(line, "$PAIR001,050,", 13) == 0) {
+      char result = line[13];
+      Serial.printf("[GPS] ACK PAIR050 recu : \"%s\" -- %s\n",
+                    line, result == '0' ? "OK, commande acceptee par le module"
+                                         : "ECHEC, le module a refuse la commande");
+      ackSeen = true;
+      break;
+    }
+  }
+
+  if (!ackSeen) {
+    Serial.println("[GPS] Aucun ACK PAIR001,050 recu dans le delai -- "
+                    "soit le module ne repond pas aux PAIR050 sur ce firmware, "
+                    "soit la commande est arrivee trop tot apres begin().");
+  }
+}
+
+// Mesure le nombre reel de trames RMC recues sur measureMs -- verification
+// independante de l'ACK, car un module peut repondre "OK" sans reellement
+// changer de cadence. En dessous de 8Hz on considere que le 10Hz n'a pas
+// pris effet.
+static void measureActualRmcRate(unsigned long measureMs) {
+  char line[96];
+  unsigned long deadline = millis() + measureMs;
+  int rmcCount = 0;
+
+  while ((long)(deadline - millis()) > 0) {
+    if (!readGpsLineBlocking(line, sizeof(line), deadline - millis())) continue;
+    if (strlen(line) >= 6 && strncmp(line + 3, "RMC", 3) == 0) rmcCount++;
+  }
+
+  float hz = rmcCount * 1000.0f / (float)measureMs;
+  Serial.printf("[GPS] Debit RMC mesure : %d trames en %lums (~%.1fHz) -- %s\n",
+                rmcCount, measureMs, hz,
+                hz >= 8.0f ? "10Hz actif, config OK"
+                           : "toujours proche de 1Hz -- la commande PAIR050 n'a PAS ete appliquee");
+}
+
 // ===================== DEBUG : balayage de baudrate GPS =====================
 // Desactive ici -- 115200 deja confirme sur ce montage au test brut
 // precedent. Conserve au cas ou tu changes de module GPS plus tard.
@@ -318,7 +396,9 @@ void initGps() {
   configureOutputSentences();
   delay(100);
   configureFixRate10Hz();
-  delay(100);
+
+  confirmFixRateAck(500);       // ACK explicite du module a PAIR050
+  measureActualRmcRate(2000);   // debit RMC reellement observe sur 2s
 
   Serial.println("GPS LC76G configure (115200 bauds, PAIR050/PAIR062, cible 10Hz sur GGA/GSA/RMC).");
 }
