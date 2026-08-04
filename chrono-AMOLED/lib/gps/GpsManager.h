@@ -34,6 +34,17 @@ extern volatile bool newGpsData;
 // pas sticky) -- sert d'indicateur "source active".
 extern bool gpsActive;
 
+// Debit RMC reellement mesure au boot (cf. measureActualRmcRate() dans
+// GpsManager.cpp) -- ~10.0 si PAIR050 a bien pris, ~1.0 sinon (config
+// non appliquee, ex. souci cablage TX vecu le 04/08). Fige a la valeur
+// mesuree une seule fois au demarrage, ne se remet pas a jour ensuite.
+extern float gpsMeasuredRmcHz;
+
+// true si le module a explicitement acquitte PAIR050 (independant de
+// gpsMeasuredRmcHz -- un module peut acquitter sans reellement changer
+// de cadence, cf. diagnostic 04/08, d'ou les deux indicateurs distincts).
+extern bool gpsFixRateAckOk;
+
 // Configure et demarre le module GPS -- a appeler une fois dans setup().
 void initGps();
 

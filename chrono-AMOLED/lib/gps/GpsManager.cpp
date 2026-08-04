@@ -29,6 +29,12 @@ bool gpsActive = false;
 static unsigned long lastGpsFrameAt = 0;
 static const unsigned long GPS_TIMEOUT_MS = 3000;
 
+// Resultats du diagnostic 10Hz au boot, exposes pour l'ecran Connexion
+// (cf. GpsManager.h) -- pas d'acces console possible sur la moto, donc
+// ces infos doivent etre lisibles a l'ecran.
+float gpsMeasuredRmcHz = 0.0f;
+bool gpsFixRateAckOk = false;
+
 // ===================== Envoi de commandes PAIR (config module) =====================
 //
 // Protocole PROPRIETAIRE Quectel "$PAIR" -- PAS le protocole legacy
@@ -106,6 +112,7 @@ static void confirmFixRateAck(unsigned long maxWaitMs) {
     if (!readGpsLineBlocking(line, sizeof(line), deadline - millis())) break;
     if (strncmp(line, "$PAIR001,050,", 13) == 0) {
       char result = line[13];
+      gpsFixRateAckOk = (result == '0');
       Serial.printf("[GPS] ACK PAIR050 recu : \"%s\" -- %s\n",
                     line, result == '0' ? "OK, commande acceptee par le module"
                                          : "ECHEC, le module a refuse la commande");
@@ -142,6 +149,7 @@ static void measureActualRmcRate(unsigned long measureMs) {
   }
 
   float hz = rmcCount * 1000.0f / (float)measureMs;
+  gpsMeasuredRmcHz = hz;
   Serial.printf("[GPS] Debit RMC mesure : %d trames en %lums (~%.1fHz) -- %s\n",
                 rmcCount, measureMs, hz,
                 hz >= 8.0f ? "10Hz actif, config OK"

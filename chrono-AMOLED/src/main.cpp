@@ -75,6 +75,29 @@ volatile bool pushButtonPressed = false;
 static unsigned long lastPushIsrMs = 0;
 static const unsigned long PUSH_DEBOUNCE_MS = 200;
 
+// Rallonge specifiquement l'action BACK quand on est sur l'ecran Statut
+// en cours d'enregistrement -- cf. souci constate sur le SV (bicylindre,
+// vibrations plus marquees qu'un 4-cylindres) : une simple impulsion
+// parasite sur BACK suffit a naviguer vers Circuit sans arreter
+// l'enregistrement pour de bon (pas de confirmation contrairement a
+// PUSH, cf. handleBack()). Le debounce logiciel de 500ms (BACK_DEBOUNCE_MS
+// ci-dessus) ne protege pas contre ca : il filtre le rebond d'un vrai
+// appui, pas une impulsion parasite isolee qui ressemble en tout point a
+// un vrai front descendant. Ailleurs (hors REC), BACK reste instantane
+// -- pas de gene percue, le risque concerne surtout ce cas precis ou le
+// bouton doit rester au repos pendant plusieurs minutes/tours.
+static const unsigned long BACK_HOLD_FOR_REC_MS = 300; // etait 150, double (04/08)
+static unsigned long backHoldPendingSinceMs = 0; // 0 = pas d'appui BACK en attente de confirmation
+
+// Meme protection sur PUSH -- pendant l'enregistrement, PUSH met en
+// pause (cf. handlePush(), case SCR_STATUS). Un faux contact ici
+// interromprait une session en cours aussi surement qu'un faux BACK
+// (juste un ecran de confirmation different derriere, ce qui n'empeche
+// pas la coupure elle-meme d'etre indesirable). Meme delai que BACK par
+// coherence -- a ajuster independamment si besoin.
+static const unsigned long PUSH_HOLD_FOR_REC_MS = 300; // etait 150, double (04/08)
+static unsigned long pushHoldPendingSinceMs = 0; // 0 = pas d'appui PUSH en attente de confirmation
+
 void IRAM_ATTR backButtonISR() {
   unsigned long now = millis();
   if (now - lastBackIsrMs < BACK_DEBOUNCE_MS) return;
@@ -1685,10 +1708,29 @@ static void buildConnexionScreen() {
 }
 
 static void refreshConnexionScreen() {
-  char buf[48];
-  snprintf(buf, sizeof(buf), "%s  Fix:%d  Sat:%d", gpsActive ? "GPS OK" : "GPS --", gpsFixStatus, gpsNumSVs);
+  char buf[64];
+  // Debit GPS mesure au boot ajoute sur la meme ligne (cf. diagnostic
+  // 04/08 -- souci cablage TX qui bloquait le passage a 10Hz, invisible
+  // sans ecran vu qu'on n'a jamais le serial sur la moto). Ecran en
+  // 536x240 (paysage) : largeur confortable pour une ligne plus longue,
+  // mais pas de hauteur pour une 5e ligne separee.
+  snprintf(buf, sizeof(buf), "%s  Fix:%d  Sat:%d  %.0fHz", gpsActive ? "GPS OK" : "GPS --", gpsFixStatus, gpsNumSVs, gpsMeasuredRmcHz);
+  lv_obj_set_style_text_color(lblConnGps, (gpsActive && gpsMeasuredRmcHz < 8.0f) ? lv_palette_main(LV_PALETTE_RED) : lv_color_white(), 0);
   lv_label_set_text(lblConnGps, buf);
-  lv_label_set_text(lblConnCircuit, getActiveCourseNameForDisplay());
+
+  // Pendant la phase de detection (avant qu'un circuit soit valide ou
+  // que le repli Lap Anything s'active), on affiche le compteur de
+  // rejets plutot que juste "Detection..." -- utile pour voir sur
+  // circuit si ca boucle anormalement (candidat jamais valide, cf.
+  // diagnostic du 04/08) sans avoir besoin du serial.
+  if (!routeMode && !newCircuitCaptureArmed && !manualOverrideActive &&
+      !detectionEffectivelyComplete() && !lapAnythingEffective() && courseManager) {
+    char circBuf[48];
+    snprintf(circBuf, sizeof(circBuf), "Detection... (%d rejets)", courseManager->getDetectionRejectionCount());
+    lv_label_set_text(lblConnCircuit, circBuf);
+  } else {
+    lv_label_set_text(lblConnCircuit, getActiveCourseNameForDisplay());
+  }
 
   if (gpsLogsOnSd) {
     unsigned long usedGb10 = (unsigned long)(sdUsedBytes() * 10 / (1024ULL * 1024 * 1024));
@@ -2263,11 +2305,43 @@ void loop() {
   if (lvglLock(10)) {
     if (pushButtonPressed) {
       pushButtonPressed = false;
-      handlePush();
+      if (currentScreen == SCR_STATUS && recordingEnabled) {
+        pushHoldPendingSinceMs = millis();
+      } else {
+        handlePush();
+      }
     }
     if (backButtonPressed) {
       backButtonPressed = false;
-      handleBack();
+      if (currentScreen == SCR_STATUS && recordingEnabled) {
+        // Cas a risque (cf. commentaire pres de BACK_HOLD_FOR_REC_MS) --
+        // n'execute pas tout de suite, arme juste la verification.
+        backHoldPendingSinceMs = millis();
+      } else {
+        handleBack();
+      }
+    }
+    // Verifie si un appui PUSH ou BACK en attente de confirmation
+    // (ci-dessus) a bien tenu assez longtemps -- filtre les impulsions
+    // parasites plus courtes qu'un vrai appui volontaire. Tourne a chaque
+    // iteration tant qu'une verification est en cours, independamment
+    // des flags *ButtonPressed (vrais uniquement au moment du front
+    // descendant lui-meme).
+    if (pushHoldPendingSinceMs != 0) {
+      if (digitalRead(PUSH_BUTTON) == HIGH) {
+        pushHoldPendingSinceMs = 0; // relache avant le delai -- faux contact probable, ignore
+      } else if (millis() - pushHoldPendingSinceMs >= PUSH_HOLD_FOR_REC_MS) {
+        pushHoldPendingSinceMs = 0;
+        handlePush(); // tenu assez longtemps -- vrai appui volontaire
+      }
+    }
+    if (backHoldPendingSinceMs != 0) {
+      if (digitalRead(BACK_BUTTON) == HIGH) {
+        backHoldPendingSinceMs = 0; // relache avant le delai -- faux contact probable, ignore
+      } else if (millis() - backHoldPendingSinceMs >= BACK_HOLD_FOR_REC_MS) {
+        backHoldPendingSinceMs = 0;
+        handleBack(); // tenu assez longtemps -- vrai appui volontaire
+      }
     }
     // Rotation retiree avec le rotatif physique (27/07) -- l'anneau
     // (Circuit/Connexion/Session/Reglages) se navigue desormais par swipe

@@ -353,7 +353,7 @@ resoudé) :
 
 Vérifiés sans conflit avec le reste du brochage du firmware (écran
 QSPI : 5/6/7/17/18/47/48, I2C partagé tactile+IMU : 39/40, GPS UART :
-43/44, SD SDMMC : 8/9/42, batterie ADC : 1), et sans être des broches
+12/13 (déplacé depuis 43/44, cf. section dédiée plus bas -- 04/08), SD SDMMC : 8/9/42, batterie ADC : 1), et sans être des broches
 de strapping sur l'ESP32-S3 (celles-ci sont 0/3/45/46 -- GPIO3 avait
 été utilisé un temps par erreur de soudure sur le 1er chrono, sans
 conséquence pratique constatée mais écarté par principe au profit de
@@ -506,6 +506,98 @@ Serial. Deux causes distinctes traitées :
    un lien de téléchargement du CSV complet pour analyse externe.
    `/compare` garde son graphique (pas encore simplifiée, même risque
    potentiel si le problème s'y reproduit un jour).
+
+## Diagnostic GPS bloqué à 1Hz + déplacement GPIO 43/44 -> 12/13 (04/08)
+
+Suite aux sessions ratées à Carole du 01/08 (cf. section seuil ci-dessus)
+et au retour terrain "vitesse affichée qui plafonne bizarrement au fil
+des tours" : analyse des logs GPS avec `millis_boot` (précision ms) a
+révélé que le GPS tournait en réalité à **1Hz, pas 10Hz** malgré la
+config `PAIR050,100` envoyée au boot -- delta constant de ~1000ms entre
+fixes traités sur toutes les sessions du 01/08. À 190km/h ça représente
+~53m entre deux mesures, largement au-dessus du seuil de détection de
+ligne (même à 10m) -- explique à la fois les tours fusionnés et les
+sessions à 0 tour détecté du 01/08.
+
+**Cause : aucun ACK vérifié.** `configureFixRate10Hz()` envoyait la
+commande sans jamais lire la réponse du module. Ajout de
+`confirmFixRateAck()` (lit `$PAIR001,050,x`) et `measureActualRmcRate()`
+(mesure le débit RMC réel sur 2s, indépendamment de l'ACK) au boot --
+les deux sont maintenant systématiques et visibles au boot, et le débit
+mesuré (`gpsMeasuredRmcHz`) est aussi affiché sur l'écran Connexion
+(`GPS OK Fix:x Sat:y NHz`, en rouge si <8Hz) puisqu'on n'a jamais le
+serial sur la moto.
+
+**Diagnostic** : aucun ACK reçu, et plus révélateur, les trames
+GLL/GSV/VTG (censées être coupées par `PAIR062`) continuaient de sortir
+-- donc **aucune** commande `$PAIR` n'atteignait le module, pas
+seulement `PAIR050`. Éliminé par élimination : pas un souci de firmware
+LC76G (10Hz déjà validé sur le montage TFT avec le même module et la
+même commande, cf. conversation du 27/07), pas une broche ESP32 morte
+(même symptôme identique après déplacement complet 43/44 -> 12/13, sur
+deux GPIO indépendantes). Conclusion : **sertissage TX/RXD insuffisant**
+sur le connecteur JST-PH 2.5mm reliant le module au connecteur --
+tenait mécaniquement (le loquet clipsait) sans contact électrique
+fiable en émission, alors que la réception passait par une autre paire
+de broches sur le même connecteur, d'où "réception GPS parfaite, module
+totalement muet aux commandes" comme signature du problème.
+
+**Fix retenu** : point de soudure par-dessus le sertissage existant
+(crimp + soudure, pas soudure seule -- le crimp garde la tenue
+mécanique). 10Hz confirmé au flash suivant (20 trames RMC/2000ms).
+
+**Broches** : passées de GPIO43/44 à **GPIO12/13** pendant le
+diagnostic (pour écarter l'hypothèse broche ESP32 morte) -- conservées
+telles quelles après coup, aucune raison technique de revenir en
+arrière une fois le vrai problème (sertissage) identifié et corrigé.
+Le 2e exemplaire en cours de montage reste sur son brochage propre sauf
+si son fil GPS présente le même symptôme.
+
+Seuil de détection de ligne laissé à 10.0m (pas de retour à 7.0m
+envisagé un temps pendant ce diagnostic, cf. section ci-dessus) : à
+10Hz réel l'espacement entre mesures tombe à ~5m à 190km/h, largement
+dans la marge du seuil actuel.
+
+## Anti-faux-contact BACK/PUSH pendant l'enregistrement (04/08)
+
+Constaté sur le montage SV (bicylindre en V, vibrations plus marquées
+qu'un 4-cylindres) : retour d'un petit tour avec le chrono affichant
+l'écran Circuit au lieu de l'écran Statut, sans action volontaire.
+
+**Cause** : `handleBack()` sur `SCR_STATUS` va directement vers
+`SCR_CIRCUIT` pendant un enregistrement, sans écran de confirmation
+(contrairement à PUSH qui passe par `SCR_CONFIRM_STOP`) -- une seule
+impulsion parasite sur le bouton suffit donc à naviguer hors de l'écran
+Statut. Le debounce logiciel existant (`BACK_DEBOUNCE_MS`/
+`PUSH_DEBOUNCE_MS`, cf. section "Brochage boutons") ne protège pas
+contre ça : il filtre le rebond d'un vrai appui (fronts rapprochés),
+pas une impulsion isolée qui ressemble en tout point à un vrai front
+descendant côté ISR. Vraisemblablement mécanique (bouton-poussoir
+excité par les vibrations du bicylindre), pas un souci logiciel --
+l'enregistrement lui-même n'est pas coupé dans ce cas précis (pas
+d'appel à `stopRecording()` dans ce branchement), seul l'affichage
+change, donc pas de perte de données constatée.
+
+**Fix retenu** : délai de confirmation par maintien, appliqué
+uniquement au cas à risque (`SCR_STATUS` + enregistrement en cours),
+pour BACK et PUSH -- ailleurs (menus, écran de confirmation, hors REC)
+les deux boutons restent instantanés. Le bouton doit rester
+physiquement appuyé (`digitalRead(...) == LOW`) pendant
+`BACK_HOLD_FOR_REC_MS` / `PUSH_HOLD_FOR_REC_MS` (300ms chacun, doublé
+depuis 150ms initial) avant que l'action ne s'exécute réellement ;
+relâché avant ce délai, l'appui est ignoré silencieusement. Implémenté
+via deux variables d'état (`backHoldPendingSinceMs`/
+`pushHoldPendingSinceMs`) vérifiées à chaque tour de `loop()`,
+indépendamment du flag d'ISR qui ne reste vrai qu'au moment du front
+descendant lui-même.
+
+Piste matérielle envisagée mais pas encore retenue : condensateur de
+découplage (~0,22µF, calculé pour rester très en dessous des 300ms de
+la protection logicielle avec le pull-up interne ~45kΩ de l'ESP32 --
+un 1µF testerait la limite, cf. calculs faits en conversation) en
+parallèle des contacts du bouton. Laissé de côté pour l'instant, la
+correction logicielle suffit -- à réévaluer si le symptôme persiste
+malgré tout sur circuit.
 
 ## Prochaines étapes
 
