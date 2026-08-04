@@ -9,8 +9,8 @@
 // brochage change : broches TXD/RXD dediees de la carte AMOLED 1.64
 // (GPIO43/44, UART0) au lieu des GPIO5/6 du montage Tiny N8R8.
 
-#define GPS_RX_PIN 44  // <- TX du module GPS
-#define GPS_TX_PIN 43  // -> RX du module GPS
+#define GPS_RX_PIN 12  // <- TX du module GPS -- deplace de 44 (test bout de fil TX/RX mort sur 43/44, cf. diagnostic 04/08)
+#define GPS_TX_PIN 13  // -> RX du module GPS -- deplace de 43
 
 HardwareSerial GPSSerial(1); // UART1 de l'ESP32 (l'UART0 reste pour le Serial USB de debug)
 
@@ -100,6 +100,7 @@ static void confirmFixRateAck(unsigned long maxWaitMs) {
   char line[96];
   unsigned long deadline = millis() + maxWaitMs;
   bool ackSeen = false;
+  int otherLines = 0;
 
   while ((long)(deadline - millis()) > 0) {
     if (!readGpsLineBlocking(line, sizeof(line), deadline - millis())) break;
@@ -111,12 +112,18 @@ static void confirmFixRateAck(unsigned long maxWaitMs) {
       ackSeen = true;
       break;
     }
+    // Toute autre ligne recue pendant la fenetre -- affichee en brut pour
+    // voir si le module repond autre chose que ce qu'on attend (au lieu de
+    // la jeter silencieusement comme avant).
+    Serial.printf("[GPS] (brut, pendant l'attente ACK) : \"%s\"\n", line);
+    otherLines++;
   }
 
   if (!ackSeen) {
-    Serial.println("[GPS] Aucun ACK PAIR001,050 recu dans le delai -- "
-                    "soit le module ne repond pas aux PAIR050 sur ce firmware, "
-                    "soit la commande est arrivee trop tot apres begin().");
+    Serial.printf("[GPS] Aucun ACK PAIR001,050 recu dans le delai (%d autre(s) ligne(s) vue(s)) -- "
+                  "soit le module ne repond pas aux PAIR050 sur ce firmware, "
+                  "soit le module connecte n'est pas un Quectel (protocole PAIR non reconnu), "
+                  "soit la commande est arrivee trop tot apres begin().\n", otherLines);
   }
 }
 
