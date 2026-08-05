@@ -1668,6 +1668,18 @@ static void buildCircuitScreen() {
 }
 
 static void circuitRowTappedCb(lv_event_t* e) {
+  // Bloque le changement de circuit pendant un enregistrement en cours --
+  // le tap direct valide immediatement sans confirmation (cf. commentaire
+  // ci-dessous), donc un tap parasite ici en pleine session changerait le
+  // circuit actif sous CourseManager sans aucun garde-fou. Risque concret
+  // si on arrive sur cet ecran via un faux BACK malgre la protection par
+  // maintien deja en place (cf. section README "Anti-faux-contact
+  // BACK/PUSH", 04/08) -- celle-ci reduit le risque de quitter l'ecran
+  // Statut par erreur, elle ne l'annule pas.
+  if (recordingEnabled) {
+    Serial.println("[UI] Tap circuit ignore -- enregistrement en cours, changement de circuit bloque.");
+    return;
+  }
   int idx = (int)(intptr_t)lv_event_get_user_data(e);
   applyCircuitSelection(idx); // tap direct = selectionne + valide en un seul geste
 }
@@ -1900,6 +1912,16 @@ static lv_obj_t* lblFreezeRow;
 static lv_obj_t* lblRouteRow;
 
 static void settingsRowTappedCb(lv_event_t* e) {
+  // Bloque pendant un enregistrement -- demarrer le WiFi softAP en
+  // pleine session cumule deux risques : etat de capture incoherent
+  // avec CourseManager en cours de tour, et le souci deja documente de
+  // contention mutex LVGL/WiFi sur ce projet (softAP jamais appele
+  // depuis un callback tactile pour cette raison meme, cf. section
+  // "Pieges" plus bas -- meme logique appliquee ici cote garde-fou).
+  if (recordingEnabled) {
+    Serial.println("[UI] Tap WiFi ignore -- enregistrement en cours.");
+    return;
+  }
   selectingMode = false;
   wifiStartRequested = true; // traite dans loop(), pas ici (cf. commentaire pres de la declaration)
   goToScreen(SCR_WIFI); // tap direct = ouvre WiFi en un seul geste
@@ -1910,6 +1932,14 @@ static void settingsRowTappedCb(lv_event_t* e) {
 // Nouveau circuit (tout-tactile pour ce genre de reglage simple).
 static void refreshSettingsScreen();
 static void freezeRowTappedCb(lv_event_t* e) {
+  // Bloque pendant un enregistrement, meme logique que les autres tap
+  // directs -- pas de raison de laisser passer un tap parasite ici en
+  // pleine session, meme si l'impact d'un mauvais reglage de pause est
+  // mineur compare aux autres cas.
+  if (recordingEnabled) {
+    Serial.println("[UI] Tap pause ignore -- enregistrement en cours.");
+    return;
+  }
   int idx = 0;
   for (int i = 0; i < FREEZE_PRESETS_COUNT; i++) if (FREEZE_PRESETS_S[i] == lapFreezeS) { idx = i; break; }
   idx = (idx + 1) % FREEZE_PRESETS_COUNT;
@@ -2004,6 +2034,14 @@ static void refreshWifiScreen() {
 // bas de l'ecran Circuit.
 
 static void startCaptureTappedCb(lv_event_t* e) {
+  // Bloque pendant un enregistrement -- armer une nouvelle capture de
+  // circuit alors qu'un enregistrement est deja en cours mettrait
+  // CourseManager dans un etat double (tour en cours + capture en
+  // attente) jamais prevu.
+  if (recordingEnabled) {
+    Serial.println("[UI] Tap nouvelle capture ignore -- enregistrement en cours.");
+    return;
+  }
   armNewCircuitCapture();
   goToScreen(SCR_STATUS);
 }

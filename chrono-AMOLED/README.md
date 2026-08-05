@@ -599,6 +599,25 @@ parallèle des contacts du bouton. Laissé de côté pour l'instant, la
 correction logicielle suffit -- à réévaluer si le symptôme persiste
 malgré tout sur circuit.
 
+**Complément** : la protection BACK/PUSH réduit le risque de quitter
+l'écran Statut par erreur, mais ne l'annule pas complètement (un
+maintien parasite de 300ms+ reste possible). Si ça arrive quand même,
+l'écran Circuit a le tactile pleinement actif, contrairement à Statut
+(swipe + tap non câblés du tout dessus, cf. `enableRingSwipe()` jamais
+appelé sur `scrStatus` -- vérifié, pas juste par absence). Or un tap
+sur une ligne de circuit valide **immédiatement** le changement, sans
+confirmation. Bloqué directement dans `circuitRowTappedCb()` : tap
+ignoré (juste un log Serial) si `recordingEnabled` est vrai, pour
+qu'un tap parasite en pleine session ne puisse plus changer le circuit
+actif sous `CourseManager`. Même garde-fou ajouté sur les autres tap
+directs identifiés : nouvelle capture de circuit
+(`startCaptureTappedCb`), réglage de pause (`freezeRowTappedCb`) et
+ouverture WiFi (`settingsRowTappedCb` -- celui-ci cumulait en plus le
+risque déjà documenté de contention mutex LVGL/WiFi si le softAP
+démarrait pendant un enregistrement). `routeRowTappedCb` (Mode Route)
+avait déjà ce garde-fou de son côté, mis en place lors de son
+implémentation initiale.
+
 ## Prochaines étapes
 
 - Page web `/circuits` pour éditer `circuits.csv` à chaud : ✅ fait,
