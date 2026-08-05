@@ -65,6 +65,16 @@ struct WebServerStatusInfo {
   String logsFsLabel = "SD (logs GPS)";
   uint64_t logsFsUsedBytes = 0;
   uint64_t logsFsTotalBytes = 0;
+  // Diagnostics ajoutes le 05/08 -- deja affiches sur l'ecran Connexion
+  // de l'appareil, reproduits ici pour un acces a distance (WiFi) sans
+  // etre physiquement devant l'appareil. Cf. sections README
+  // "Diagnostic GPS bloque a 1Hz" et discussion temperature CPU.
+  float gpsRmcHz = 0.0f;          // debit RMC mesure au boot -- ~10 si OK, ~1 si souci cablage/module
+  bool gpsFixRateAckOk = false;   // ACK PAIR050 recu du module au boot
+  int detectionRejectionCount = 0; // rejets CourseManager depuis le dernier circuit valide
+  int battPercent = 0;
+  float battVoltage = 0.0f;
+  float cpuTempC = 0.0f;
 };
 typedef WebServerStatusInfo (*WebServerGetStatusFn)();
 

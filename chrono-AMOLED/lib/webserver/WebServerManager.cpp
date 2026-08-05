@@ -1335,14 +1335,20 @@ static void handleStatusPage() {
 
   html += "<div class='card' style='display:block'>GPS : <span class='pill ";
   html += s.bleConnected ? "ok'>CONNECTE" : "bad'>DECONNECTE";
-  html += "</span><br>Fix GPS : " + String(s.fixStatus) + " &nbsp; Satellites : " + String(s.numSats) + "</div>";
+  html += "</span><br>Fix GPS : " + String(s.fixStatus) + " &nbsp; Satellites : " + String(s.numSats);
+  html += " &nbsp; Debit : <span class='pill " + String(s.gpsRmcHz >= 8.0f ? "ok" : "bad") + "'>" + String(s.gpsRmcHz, 1) + "Hz</span>";
+  html += " &nbsp; ACK PAIR050 : " + String(s.gpsFixRateAckOk ? "oui" : "non") + "</div>";
 
-  html += "<div class='card' style='display:block'>Circuit actif<br><span class='big'>" + s.circuitName + "</span></div>";
+  html += "<div class='card' style='display:block'>Circuit actif<br><span class='big'>" + s.circuitName + "</span>";
+  html += "<br>Rejets de detection : " + String(s.detectionRejectionCount) + "</div>";
 
   html += "<div class='card' style='display:block'>Enregistrement : <span class='pill ";
   html += s.recordingEnabled ? "ok'>ACTIF" : "bad'>ARRETE";
   html += "</span><br>Tours : " + String(s.lapsCount) +
           " &nbsp; Dernier : " + s.lastLapTime + " &nbsp; Meilleur : " + s.bestLapTime + "</div>";
+
+  html += "<div class='card' style='display:block'>Batterie : <span class='pill " + String(s.battPercent <= 15 ? "bad" : "ok") + "'>" + String(s.battPercent) + "%</span>";
+  html += " (" + String(s.battVoltage, 2) + "V) &nbsp; CPU : <span class='pill " + String(s.cpuTempC >= 70.0f ? "bad" : "ok") + "'>" + String(s.cpuTempC, 0) + "C</span></div>";
 
   html += "<div class='card' style='display:block'>Memoire libre (heap) : " + String(ESP.getFreeHeap()) + " octets<br>";
   html += "Uptime : " + String(millis() / 1000) + " s</div>";

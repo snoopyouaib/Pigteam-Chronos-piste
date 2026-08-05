@@ -1035,6 +1035,8 @@ static void flushLogsCallback() {
   if (loggingOk) logFile.flush();
 }
 
+static int batteryVoltageToPercent(float v); // definie plus bas -- declaration anticipee pour getStatusCallback()
+
 static WebServerStatusInfo getStatusCallback() {
   WebServerStatusInfo s;
   s.bleConnected = gpsActive; // champ reutilise tel quel -- represente "GPS actif" ici
@@ -1062,6 +1064,18 @@ static WebServerStatusInfo getStatusCallback() {
     s.logsFsUsedBytes = sdUsedBytes();
     s.logsFsTotalBytes = sdTotalBytes();
   }
+
+  // Diagnostics ajoutes le 05/08 -- memes infos que l'ecran Connexion,
+  // dupliquees ici pour un acces a distance sans etre devant l'appareil
+  // (cf. WebServerStatusInfo).
+  s.gpsRmcHz = gpsMeasuredRmcHz;
+  s.gpsFixRateAckOk = gpsFixRateAckOk;
+  s.detectionRejectionCount = courseManager ? courseManager->getDetectionRejectionCount() : 0;
+  float battV = 0; int battRaw = 0;
+  adc_get_value(&battV, &battRaw);
+  s.battVoltage = battV;
+  s.battPercent = batteryVoltageToPercent(battV);
+  s.cpuTempC = temperatureRead();
 
   return s;
 }
@@ -1760,8 +1774,16 @@ static void refreshConnexionScreen() {
   int raw = 0;
   adc_get_value(&v, &raw);
   int battPct = batteryVoltageToPercent(v);
-  snprintf(buf, sizeof(buf), "Batt %d%%  (%.2fV)", battPct, v);
-  lv_obj_set_style_text_color(lblConnBatt, battPct <= 15 ? lv_palette_main(LV_PALETTE_RED) : lv_color_white(), 0);
+  // Temperature interne du capteur ESP32-S3 -- surveillance ajoutee le
+  // 05/08 suite a une inquietude sur le montage AMOLED : l'ESP32 se
+  // trouve juste sous le connecteur SD, et le nouveau verrou imprime
+  // pourrait gener la convection a cet endroit. Rouge si >70C (marge
+  // avant la zone ou le plastique PLA du boitier/verrou commencerait a
+  // ramollir, cf. Tg PLA ~60C -- reste large en dessous du seuil de
+  // throttling du chip lui-meme, plus haut).
+  float cpuTempC = temperatureRead();
+  snprintf(buf, sizeof(buf), "Batt %d%%  (%.2fV)  CPU %.0fC", battPct, v, cpuTempC);
+  lv_obj_set_style_text_color(lblConnBatt, (battPct <= 15 || cpuTempC >= 70.0f) ? lv_palette_main(LV_PALETTE_RED) : lv_color_white(), 0);
   lv_label_set_text(lblConnBatt, buf);
 }
 
