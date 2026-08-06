@@ -618,6 +618,51 @@ démarrait pendant un enregistrement). `routeRowTappedCb` (Mode Route)
 avait déjà ce garde-fou de son côté, mis en place lors de son
 implémentation initiale.
 
+## Suppression du mode Pause -- arrêt par maintien BACK (05/08)
+
+Suite au test terrain du 06/08 (PigTeam_track + trajet retour "Route") :
+3 sessions parasites de quelques secondes dans `sessions.csv`
+(`20260806_073518`, `20260806_074856`, `20260806_074900`), toutes
+juste après une tentative réelle d'arrêt, toutes reprenant l'état de
+tour en cours de la session précédente au lieu de repartir à zéro.
+
+**Cause identifiée** : l'ancien écran de confirmation d'arrêt
+(`SCR_CONFIRM_STOP`) affichait "PUSH pour reprendre" / "BACK pour
+arrêter" -- textuellement correct, mais contre-intuitif en conditions
+réelles (gants, soleil, envie de repartir vite) : le réflexe naturel
+est d'appuyer sur PUSH en pensant "confirmer = valider", ce qui
+relançait l'enregistrement au lieu de l'arrêter. D'où les redémarrages
+répétés observés.
+
+**Décision** : le mode Pause lui-même n'a plus de raison d'être. En
+course comme en track day, le chrono tourne du paddock au paddock sans
+jamais être mis en pause -- ce mode intermédiaire (hérité du firmware
+TFT) résolvait un besoin qui ne se présente pas dans l'usage réel du
+projet.
+
+**Fix** : écran `SCR_CONFIRM_STOP` retiré entièrement (enum, écran
+LVGL, fonctions `build`/`refreshConfirmStopScreen()`, toutes les
+références). PUSH ne fait plus rien pendant l'enregistrement. BACK
+**maintenu 700ms** sur l'écran Statut pendant l'enregistrement
+déclenche directement l'arrêt définitif (`stopRecording()` +
+`activateAutoMode()`, reste sur l'écran Statut) -- réutilise le
+mécanisme de maintien déjà en place pour BACK/PUSH (cf. section
+"Anti-faux-contact" ci-dessus), porté de 300ms à 700ms puisqu'il n'y a
+plus d'écran de confirmation derrière pour rattraper une erreur. BACK
+choisi plutôt que PUSH pour ce geste : bouton physiquement plus court
+sur les deux exemplaires, donc plus dur à actionner par inadvertance.
+
+Le protocole desormais : PUSH pour armer/lancer depuis le paddock,
+BACK maintenu 700ms pour arrêter en rentrant. Rien d'autre.
+
+**Mode Route** : ce retrait supprime aussi la capacité à mettre en
+pause un enregistrement en mode Route (ex. arrêt café en cours de
+trajet) -- un arrêt en Route ferme désormais la session pour de bon,
+comme sur circuit. Choix assumé (05/08) : le mode Route reste pour
+l'instant un usage secondaire (vélo notamment), pas de raison de
+complexifier le protocole BACK/PUSH pour ce cas avant qu'un vrai besoin
+se présente.
+
 ## Prochaines étapes
 
 - Page web `/circuits` pour éditer `circuits.csv` à chaud : ✅ fait,

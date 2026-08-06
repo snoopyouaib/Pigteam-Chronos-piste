@@ -75,28 +75,27 @@ volatile bool pushButtonPressed = false;
 static unsigned long lastPushIsrMs = 0;
 static const unsigned long PUSH_DEBOUNCE_MS = 200;
 
-// Rallonge specifiquement l'action BACK quand on est sur l'ecran Statut
-// en cours d'enregistrement -- cf. souci constate sur le SV (bicylindre,
-// vibrations plus marquees qu'un 4-cylindres) : une simple impulsion
-// parasite sur BACK suffit a naviguer vers Circuit sans arreter
-// l'enregistrement pour de bon (pas de confirmation contrairement a
-// PUSH, cf. handleBack()). Le debounce logiciel de 500ms (BACK_DEBOUNCE_MS
-// ci-dessus) ne protege pas contre ca : il filtre le rebond d'un vrai
-// appui, pas une impulsion parasite isolee qui ressemble en tout point a
-// un vrai front descendant. Ailleurs (hors REC), BACK reste instantane
-// -- pas de gene percue, le risque concerne surtout ce cas precis ou le
-// bouton doit rester au repos pendant plusieurs minutes/tours.
-static const unsigned long BACK_HOLD_FOR_REC_MS = 300; // etait 150, double (04/08)
-static unsigned long backHoldPendingSinceMs = 0; // 0 = pas d'appui BACK en attente de confirmation
-
-// Meme protection sur PUSH -- pendant l'enregistrement, PUSH met en
-// pause (cf. handlePush(), case SCR_STATUS). Un faux contact ici
-// interromprait une session en cours aussi surement qu'un faux BACK
-// (juste un ecran de confirmation different derriere, ce qui n'empeche
-// pas la coupure elle-meme d'etre indesirable). Meme delai que BACK par
-// coherence -- a ajuster independamment si besoin.
-static const unsigned long PUSH_HOLD_FOR_REC_MS = 300; // etait 150, double (04/08)
-static unsigned long pushHoldPendingSinceMs = 0; // 0 = pas d'appui PUSH en attente de confirmation
+// BACK maintenu pendant l'enregistrement = arret definitif (05/08,
+// remplace l'ancien systeme PUSH=pause + ecran de confirmation
+// PUSH=reprendre/BACK=arreter -- source de confusion reelle constatee
+// sur le terrain, cf. section README correspondante : plusieurs
+// redemarrages parasites le 06/08 en cherchant a arreter, l'utilisateur
+// appuyant sur PUSH en pensant confirmer l'arret alors que PUSH
+// relancait). En course comme en track day le chrono tourne du paddock
+// au paddock sans pause -- plus besoin de ce mode intermediaire.
+//
+// Le maintien protege contre un appui accidentel : BACK est le bouton
+// le plus court des deux (choix delibere, plus dur a actionner par
+// inadvertance qu'un bouton plus long) et n'a plus d'ecran de
+// confirmation derriere lui pour rattraper une erreur -- d'ou un delai
+// plus long (700ms) que celui utilise auparavant pour la simple
+// navigation vers Circuit (300ms, qui avait un filet de securite
+// derriere). Un simple contact parasite (vibration) ressemble a un
+// front descendant isole, pas a un contact ferme en continu sur 700ms
+// -- largement en dessous du temps de reaction humain pour un vrai
+// appui volontaire.
+static const unsigned long BACK_HOLD_STOP_MS = 700;
+static unsigned long backHoldStopPendingSinceMs = 0; // 0 = pas d'appui BACK en attente de confirmation
 
 void IRAM_ATTR backButtonISR() {
   unsigned long now = millis();
@@ -834,18 +833,13 @@ static void stopRecording() {
   if (loggingOk) { logFile.flush(); logFile.close(); loggingOk = false; }
   // IMPORTANT : appele ICI, avant "# session arretee" -- une version
   // precedente l'appelait seulement au moment de la confirmation d'arret
-  // definitif (SCR_CONFIRM_STOP), qui intervient APRES ce stopRecording()
-  // (celui-ci sert aussi de pause, cf. handlePush()/SCR_STATUS). Consequence
-  // reelle constatee : la ligne "Route" atterrissait APRES le marqueur
+  // definitif (ancien ecran SCR_CONFIRM_STOP, retire le 05/08 -- cf.
+  // section README correspondante). Consequence reelle constatee a
+  // l'epoque : la ligne "Route" atterrissait APRES le marqueur
   // "# session arretee" deja ecrit, donc EN DEHORS du bloc demarree/arretee
   // -- loadSessionSummaries() l'ignorait completement (current==nullptr des
   // ce marqueur vu), rendant le resume Route invisible sur la page web
-  // (carte d'accueil ET lien /lap absents, lapCount reste a 0). Consequence
-  // du deplacement : si Route est mis en pause puis reprise plusieurs fois
-  // avant l'arret definitif, chaque segment ecrit desormais sa propre ligne
-  // "Route" (mêmes accumulateurs deja remis a zero par startRecording() a
-  // chaque reprise, cf. plus haut -- pas de perte supplementaire par
-  // rapport a avant, juste rendu visible/correctement rattache).
+  // (carte d'accueil ET lien /lap absents, lapCount reste a 0).
   finalizeRouteSessionIfNeeded(); // no-op si routeMode est false
   appendSessionLine("# session arretee");
   recordingEnabled = false;
@@ -1240,23 +1234,14 @@ static void handleSerialCommands() {
 
 // ===================== Navigation =====================
 
-enum AppScreen { SCR_STATUS, SCR_CIRCUIT, SCR_CONNEXION, SCR_SESSION_LIST, SCR_SESSION_LAPS, SCR_SETTINGS, SCR_WIFI, SCR_NEW_CIRCUIT, SCR_CONFIRM_STOP };
+enum AppScreen { SCR_STATUS, SCR_CIRCUIT, SCR_CONNEXION, SCR_SESSION_LIST, SCR_SESSION_LAPS, SCR_SETTINGS, SCR_WIFI, SCR_NEW_CIRCUIT };
 static AppScreen currentScreen = SCR_STATUS;
-static unsigned long confirmStopEnteredMs = 0;
-// Faux contact electrique (bruit sur l'alim, pas forcement un vrai doigt)
-// = evenement quasi instantane. Un vrai choix humain de REPRENDRE prend
-// toujours au moins quelques centaines de ms de reaction -- on ignore donc
-// REPRENDRE (tactile/PUSH) pendant cette fenetre courte apres l'ouverture
-// de l'ecran. BACK (arret definitif) n'est PAS concerne : c'est toujours
-// la direction "sure", pas besoin de la retarder.
-static const unsigned long CONFIRM_STOP_INPUT_GRACE_MS = 600UL;
 // Idem, mais cote ecran Statut : une fois l'arret DEFINITIF confirme, le
 // geofencing (rayon 15km, cf. GEOFENCE_MAX_DISTANCE_M) peut redetecter le
 // circuit et rearmer le bouton REC en ~1s si on est pres de la piste --
 // constate au banc (cf. log Serial du 27/07 : "Retour en mode detection
 // automatique" suivi de "REC ON" en une poignee de lignes). Cette fenetre
-// protege specifiquement le REC de l'ecran Statut juste apres un arret
-// definitif, en plus de la protection REPRENDRE ci-dessus.
+// protege le REC de l'ecran Statut juste apres un arret definitif.
 static unsigned long lastDefinitiveStopMs = 0;
 static const unsigned long STATUS_REC_GRACE_AFTER_STOP_MS = 1500UL;
 static bool selectingMode = false; // true = mode "selection dans la liste" (Circuit/Session/Reglages), arme par PUSH
@@ -1281,7 +1266,6 @@ static lv_obj_t* scrSessionLaps;
 static lv_obj_t* scrSettings;
 static lv_obj_t* scrWifi;
 static lv_obj_t* scrNewCircuit;
-static lv_obj_t* scrConfirmStop;
 
 static bool screenDirty = true; // force un redessin complet au prochain refresh
 
@@ -1312,7 +1296,6 @@ static void goToScreen(AppScreen s) {
     case SCR_SETTINGS:     ringIndex = 4; lv_scr_load(scrSettings); setEncoderForRing(); break;
     case SCR_SESSION_LAPS: lv_scr_load(scrSessionLaps); break;
     case SCR_WIFI:         lv_scr_load(scrWifi); break;
-    case SCR_CONFIRM_STOP: lv_scr_load(scrConfirmStop); break;
   }
 }
 
@@ -1424,56 +1407,6 @@ static void buildStatusScreen() {
   lv_obj_set_style_text_font(lblTours, &lv_font_teko_bold_38, 0); // etait medium_34, aligne sur Dernier/Best
   lv_obj_set_style_text_color(lblTours, lv_color_white(), 0);
   lv_obj_align(lblTours, LV_ALIGN_BOTTOM_RIGHT, -4, -4);
-}
-
-// ===================== Confirmation d'arret (a la RaceChrono) =====================
-// BACK depuis SCR_STATUS pendant l'enregistrement ne stoppe plus
-// directement -- il ouvre cet ecran. Le PUSH relance aussitot, le
-// circuit etant reste arme (courseManager pas reset par stopRecording()).
-// BACK confirme l'arret definitif (desarme le circuit, cf. handleBack()).
-// Plus de timeout automatique (29/07, cf. commentaire pres de
-// refreshConfirmStopScreen()) -- cet ecran reste arme indefiniment tant
-// que PUSH ou BACK n'a pas ete presse. Aucun bouton tactile REPRENDRE
-// (28/07) : preuve au Serial d'un faux contact capacitif declenchant
-// l'enregistrement seul -- cf. commentaire pres de lblRecHint dans
-// buildStatusScreen().
-
-static void buildConfirmStopScreen() {
-  scrConfirmStop = lv_obj_create(NULL);
-  lv_obj_set_style_bg_color(scrConfirmStop, lv_color_black(), 0);
-  lv_obj_clear_flag(scrConfirmStop, LV_OBJ_FLAG_SCROLLABLE);
-
-  lv_obj_t* lblTitle = lv_label_create(scrConfirmStop);
-  lv_obj_set_style_text_font(lblTitle, &lv_font_teko_medium_34, 0);
-  lv_obj_set_style_text_color(lblTitle, lv_palette_main(LV_PALETTE_ORANGE), 0);
-  lv_label_set_text(lblTitle, "Enregistrement en pause");
-  lv_obj_align(lblTitle, LV_ALIGN_TOP_MID, 0, 20);
-
-  // Pas de widget bouton ici (28/07) -- meme raison que lblRecHint, cf.
-  // commentaire pres de sa creation dans buildStatusScreen(). Simple
-  // texte d'etat, seul le PUSH declenche la reprise -- cf.
-  // handlePush()/SCR_CONFIRM_STOP.
-  lv_obj_t* lblReprendre = lv_label_create(scrConfirmStop);
-  lv_obj_set_style_text_font(lblReprendre, &lv_font_teko_bold_38, 0);
-  lv_obj_set_style_text_color(lblReprendre, lv_palette_main(LV_PALETTE_GREEN), 0);
-  lv_label_set_text(lblReprendre, "PUSH pour reprendre");
-  lv_obj_align(lblReprendre, LV_ALIGN_CENTER, 0, -10);
-
-  lv_obj_t* lblBack = lv_label_create(scrConfirmStop);
-  lv_obj_set_style_text_font(lblBack, &lv_font_teko_bold_38, 0); // etait medium_26, aligne sur "PUSH pour reprendre"
-  lv_obj_set_style_text_color(lblBack, lv_color_white(), 0);
-  lv_label_set_text(lblBack, "BACK pour arreter");
-  lv_obj_align(lblBack, LV_ALIGN_CENTER, 0, 60);
-}
-
-static void refreshConfirmStopScreen() {
-  // Plus de decompte automatique (29/07) -- cet ecran reste arme
-  // indefiniment tant que PUSH (reprendre) ou BACK (arreter) n'a pas
-  // ete presse, plus de securite de repli qui confirmait l'arret tout
-  // seul. Desormais utile en tant que tel avec le mode Route (pause
-  // volontaire en cours de trajet, ex. un arret cafe, sans limite de
-  // temps a respecter). Fonction gardee vide plutot que supprimee --
-  // appelee depuis refreshCurrentScreen(), simplifie l'appelant.
 }
 
 static void updateStatusScreen(unsigned long nowMs) {
@@ -2106,7 +2039,6 @@ static void refreshCurrentScreen(unsigned long nowMs) {
     case SCR_SETTINGS:     refreshSettingsScreen(); break;
     case SCR_WIFI:         refreshWifiScreen(); break;
     case SCR_NEW_CIRCUIT:  break; // statique, rien a rafraichir
-    case SCR_CONFIRM_STOP: refreshConfirmStopScreen(); break;
   }
   screenDirty = false;
 }
@@ -2141,28 +2073,21 @@ static void openSessionLaps(int i) {
 static void handlePush() {
   switch (currentScreen) {
     case SCR_STATUS:
-      if (recordingEnabled) {
-        // Option 1 (comme sur TFT) : PUSH met en pause pendant
-        // l'enregistrement -- pas BACK. stopRecording() ici agit comme une
-        // pause : le fichier de log est ferme mais le circuit reste arme
-        // (courseManager pas reset), pour permettre une reprise rapide.
-        stopRecording();
-        confirmStopEnteredMs = millis();
-        goToScreen(SCR_CONFIRM_STOP);
-        break;
-      }
+      // PUSH ne fait plus rien pendant l'enregistrement (05/08) --
+      // suppression du mode Pause/Reprendre. En course ou en track day
+      // le chrono tourne du paddock au paddock, sans pause -- ce mode
+      // n'avait plus de raison d'etre et son ecran de confirmation
+      // (PUSH=reprendre / BACK=arreter) etait une source de confusion
+      // reelle constatee sur le terrain (cf. session du 06/08 --
+      // plusieurs redemarrages parasites en cherchant a arreter).
+      // L'arret se fait desormais par un appui BACK MAINTENU (cf. bloc
+      // dedie dans loop(), pres de BACK_HOLD_STOP_MS).
+      if (recordingEnabled) break;
       if (millis() - lastDefinitiveStopMs < STATUS_REC_GRACE_AFTER_STOP_MS) break; // cf. commentaire pres de la constante
       if (readBatteryPercent() <= LOW_BATT_NO_REC_PERCENT) break; // "NO BAT" affiche a la place -- pas de nouvel enregistrement sous ce seuil
       if (detectionEffectivelyComplete()) {
         startRecording();
       }
-      break;
-
-    case SCR_CONFIRM_STOP:
-      // Seule voie de reprise desormais (tactile retire, cf. buildConfirmStopScreen()).
-      if (millis() - confirmStopEnteredMs < CONFIRM_STOP_INPUT_GRACE_MS) break; // cf. commentaire pres de la constante
-      startRecording();
-      goToScreen(SCR_STATUS);
       break;
 
     case SCR_CIRCUIT:
@@ -2219,23 +2144,6 @@ static void handleBack() {
       // (comportement identique a TFT/OLED sur ce point).
       cancelNewCircuitCapture(); // no-op si rien n'est arme
       goToScreen(SCR_CIRCUIT);
-      break;
-
-    case SCR_CONFIRM_STOP:
-      // Arret definitif : desarme le circuit (auto ou force manuellement)
-      // pour qu'aucun faux contact ne puisse relancer l'enregistrement une
-      // fois qu'on a quitte la piste. Le timeout dans loop() couvre le cas
-      // ou on oublie de confirmer avant de prendre la route.
-      // finalizeRouteSessionIfNeeded() est desormais appelee dans
-      // stopRecording() lui-meme, avant "# session arretee" -- cf. son
-      // commentaire -- plus besoin ici. Pas de risque de double-ecriture :
-      // stopRecording() a son propre garde-fou "if (!recordingEnabled)
-      // return;" en tout debut de fonction, donc un appel ici serait de
-      // toute facon un no-op puisque recordingEnabled est deja repasse a
-      // false par le premier appel (PUSH pause, cf. handlePush()).
-      activateAutoMode(); // reset complet du courseManager + des flags d'armement
-      lastDefinitiveStopMs = millis(); // cf. STATUS_REC_GRACE_AFTER_STOP_MS -- le geofencing peut rearmer le circuit en ~1s
-      goToScreen(SCR_STATUS);
       break;
 
     case SCR_CIRCUIT:
@@ -2326,7 +2234,6 @@ void setup() {
     buildSettingsScreen();
     buildWifiScreen();
     buildNewCircuitScreen();
-    buildConfirmStopScreen();
     lvglUnlock();
   }
   Serial.println("[5/5] Ecrans construits, splash affiche");
@@ -2365,42 +2272,36 @@ void loop() {
   if (lvglLock(10)) {
     if (pushButtonPressed) {
       pushButtonPressed = false;
-      if (currentScreen == SCR_STATUS && recordingEnabled) {
-        pushHoldPendingSinceMs = millis();
-      } else {
-        handlePush();
-      }
+      handlePush(); // instantane -- plus de mode Pause a proteger (05/08)
     }
     if (backButtonPressed) {
       backButtonPressed = false;
       if (currentScreen == SCR_STATUS && recordingEnabled) {
-        // Cas a risque (cf. commentaire pres de BACK_HOLD_FOR_REC_MS) --
+        // Cas a risque (cf. commentaire pres de BACK_HOLD_STOP_MS) --
         // n'execute pas tout de suite, arme juste la verification.
-        backHoldPendingSinceMs = millis();
+        backHoldStopPendingSinceMs = millis();
       } else {
         handleBack();
       }
     }
-    // Verifie si un appui PUSH ou BACK en attente de confirmation
-    // (ci-dessus) a bien tenu assez longtemps -- filtre les impulsions
-    // parasites plus courtes qu'un vrai appui volontaire. Tourne a chaque
-    // iteration tant qu'une verification est en cours, independamment
-    // des flags *ButtonPressed (vrais uniquement au moment du front
-    // descendant lui-meme).
-    if (pushHoldPendingSinceMs != 0) {
-      if (digitalRead(PUSH_BUTTON) == HIGH) {
-        pushHoldPendingSinceMs = 0; // relache avant le delai -- faux contact probable, ignore
-      } else if (millis() - pushHoldPendingSinceMs >= PUSH_HOLD_FOR_REC_MS) {
-        pushHoldPendingSinceMs = 0;
-        handlePush(); // tenu assez longtemps -- vrai appui volontaire
-      }
-    }
-    if (backHoldPendingSinceMs != 0) {
+    // Verifie si un appui BACK en attente de confirmation (ci-dessus) a
+    // bien tenu assez longtemps -- filtre les impulsions parasites plus
+    // courtes qu'un vrai appui volontaire. Tourne a chaque iteration tant
+    // qu'une verification est en cours, independamment de backButtonPressed
+    // (vrai uniquement au moment du front descendant lui-meme).
+    if (backHoldStopPendingSinceMs != 0) {
       if (digitalRead(BACK_BUTTON) == HIGH) {
-        backHoldPendingSinceMs = 0; // relache avant le delai -- faux contact probable, ignore
-      } else if (millis() - backHoldPendingSinceMs >= BACK_HOLD_FOR_REC_MS) {
-        backHoldPendingSinceMs = 0;
-        handleBack(); // tenu assez longtemps -- vrai appui volontaire
+        backHoldStopPendingSinceMs = 0; // relache avant le delai -- faux contact probable, ignore
+      } else if (millis() - backHoldStopPendingSinceMs >= BACK_HOLD_STOP_MS) {
+        backHoldStopPendingSinceMs = 0;
+        // Arret definitif direct (remplace l'ancien passage par
+        // SCR_CONFIRM_STOP, cf. commentaire pres de BACK_HOLD_STOP_MS) --
+        // reste sur SCR_STATUS, pas de changement d'ecran necessaire.
+        if (recordingEnabled) {
+          stopRecording();
+          activateAutoMode(); // reset complet du courseManager + des flags d'armement
+          lastDefinitiveStopMs = millis(); // cf. STATUS_REC_GRACE_AFTER_STOP_MS -- le geofencing peut rearmer le circuit en ~1s
+        }
       }
     }
     // Rotation retiree avec le rotatif physique (27/07) -- l'anneau
@@ -2426,8 +2327,7 @@ void loop() {
   }
 
   static unsigned long lastRender = 0;
-  bool isLiveScreen = (currentScreen == SCR_STATUS || currentScreen == SCR_CONNEXION ||
-                       currentScreen == SCR_CONFIRM_STOP);
+  bool isLiveScreen = (currentScreen == SCR_STATUS || currentScreen == SCR_CONNEXION);
   bool timeToRender = isLiveScreen && (nowMs - lastRender >= 250);
   if (timeToRender || screenDirty) {
     lastRender = nowMs;
