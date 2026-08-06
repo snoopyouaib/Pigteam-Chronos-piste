@@ -6,6 +6,7 @@
 #include <esp_ota_ops.h>
 #include <vector>
 #include <algorithm>
+#include <utility>
 #include <CourseManager.h> // pour MAX_COURSES (DovesLapTimer.h) -- reutilise la meme constante que main.cpp au lieu de dupliquer "8" en dur, evite un desalignement si la lib change un jour
 
 // Plus de <SD.h> -- retire suite a la migration vers l'ESP32-S3-Tiny
@@ -45,6 +46,26 @@ static void forEachGpsLogFile(Fn callback) {
     f = root.openNextFile();
   }
   root.close(); // jamais ferme auparavant -- fuite de descripteur a chaque appel
+}
+
+// Meme principe que forEachGpsLogFile ci-dessus, filtre sur /diag_ au
+// lieu de /log_ -- logs diagnostic periodiques (cf. section README
+// "Log diagnostic periodique", 06/08).
+template<typename Fn>
+static void forEachDiagLogFile(Fn callback) {
+  File root = g_logsFs->open("/");
+  if (!root || !root.isDirectory()) return;
+  File f = root.openNextFile();
+  while (f) {
+    String name = f.name();
+    if (!name.startsWith("/")) name = "/" + name;
+    if (name.indexOf("/diag_") >= 0 && name.endsWith(".csv")) {
+      callback(name, (uint32_t)f.size());
+    }
+    f.close();
+    f = root.openNextFile();
+  }
+  root.close();
 }
 
 static void serveFile(fs::FS& fsRef, const char* path, const char* downloadName) {
@@ -1075,19 +1096,30 @@ static bool isAllowedGpsLogFile(const String& file) {
   return file.indexOf("/log_") >= 0 && file.endsWith(".csv");
 }
 
+// Meme principe pour les logs diagnostic (/diag_*.csv, cf. section
+// README "Log diagnostic periodique", 06/08) -- separee de
+// isAllowedGpsLogFile() plutot que d'elargir celle-ci, pour ne pas
+// changer le comportement de son autre usage (validation du fichier
+// pour la page /lap, qui attend specifiquement un vrai log GPS avec
+// des tours, pas un fichier diagnostic).
+static bool isAllowedDiagLogFile(const String& file) {
+  return file.indexOf("/diag_") >= 0 && file.endsWith(".csv");
+}
+
 static void handleDownloadRequest() {
   String file = httpServer.arg("file");
   if (!file.startsWith("/")) file = "/" + file;
 
   bool isGpsLog = isAllowedGpsLogFile(file);
+  bool isDiagLog = isAllowedDiagLogFile(file);
   bool isSessions = (file == g_sessionLogPath);
   bool isCircuits = (file == g_circuitsFilePath); // export pour migration vers une nouvelle carte (cf. lien sur /circuits)
-  if (!isGpsLog && !isSessions && !isCircuits) { httpServer.send(403, "text/plain", "Fichier non autorise."); return; }
+  if (!isGpsLog && !isDiagLog && !isSessions && !isCircuits) { httpServer.send(403, "text/plain", "Fichier non autorise."); return; }
 
   if (g_flushLogs) g_flushLogs(); // flush inconditionnel, simple et sans risque -- evite d'avoir a connaitre quel fichier est actuellement ouvert cote main.cpp
 
   String downloadName = file.substring(1);
-  fs::FS& fsRef = isGpsLog ? *g_logsFs : LittleFS;
+  fs::FS& fsRef = (isGpsLog || isDiagLog) ? *g_logsFs : LittleFS;
   serveFile(fsRef, file.c_str(), downloadName.c_str());
 }
 
@@ -1376,7 +1408,33 @@ static const char* SESSIONS_CSV_HEADER = "date,local_time,lap_number,lap_time,be
 static void handleDebugPage() {
   String html = pageHeader("firmware");
   html += "<h2>Mode debug</h2>";
-  html += "<div class='card' style='display:block;font-size:13px'>Reserve a la phase de test/reglage -- ";
+
+  // ----- Logs diagnostic periodiques (/diag_*.csv) -----
+  // Un fichier par session enregistree, une ligne toutes les 30s
+  // (batterie/temperature CPU/debit GPS/tas libre) -- cf. section
+  // README "Log diagnostic periodique" (06/08). Liste a part ici
+  // plutot que mele aux sessions GPS normales, comme demande.
+  std::vector<std::pair<String, uint32_t>> diagFiles;
+  forEachDiagLogFile([&](const String& name, uint32_t size) { diagFiles.push_back({name, size}); });
+  std::sort(diagFiles.begin(), diagFiles.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+  html += "<h3 style='margin-top:0'>Logs diagnostic (" + String(diagFiles.size()) + ")</h3>";
+  if (diagFiles.empty()) {
+    html += "<div class='card' style='display:block;font-size:13px'>Aucun log diagnostic pour l'instant -- cree automatiquement a chaque enregistrement.</div>";
+  } else {
+    for (auto& df : diagFiles) {
+      String shortName = df.first.substring(1); // retire le '/' de tete pour /download?file=
+      // Affiche en octets sous 1 Ko plutot qu'un "0 Ko" trompeur --
+      // ces fichiers sont petits par nature (1 ligne/30s), une session
+      // de test courte peut legitimement faire moins de 1024 octets
+      // (header seul ou header + 1-2 lignes) sans que ce soit un signe
+      // de probleme.
+      String sizeStr = df.second < 1024 ? (String(df.second) + " o") : (String(df.second / 1024) + " Ko");
+      html += "<div class='card' style='display:block;font-size:13px'>" + shortName +
+              " (" + sizeStr + ") &nbsp; <a class='file' href='/download?file=" + shortName + "'>Telecharger</a></div>";
+    }
+  }
+
+  html += "<div class='card' style='display:block;font-size:13px;margin-top:20px'>Reserve a la phase de test/reglage -- ";
   html += "vide le carnet cumulatif de tours (<code>sessions.csv</code>) sans toucher aux logs GPS detailles. ";
   html += "Equivalent de la commande Serial <code>x</code>.</div>";
 

@@ -663,6 +663,33 @@ l'instant un usage secondaire (vélo notamment), pas de raison de
 complexifier le protocole BACK/PUSH pour ce cas avant qu'un vrai besoin
 se présente.
 
+**Log diagnostic périodique** (06/08, ajouté en vue du trajet 900km A/R
+du 07/08) : fichier séparé `/diag_<timestamp>.csv`, une ligne toutes
+les 30s (pas à 10Hz comme le log GPS), ouvert/fermé avec
+l'enregistrement (même cycle de vie que `logFile`). Colonnes :
+`local_time, uptime_s, batt_pct, batt_v, cpu_temp_c, free_heap, gps_hz,
+gps_fix, gps_sats, laps, detection_rejections`. Objectif : voir
+l'évolution dans le temps de la batterie/température/débit GPS/tas
+libre sur un trajet long, sans avoir besoin de l'écran Connexion ou du
+serial en cours de route (aucun des deux disponible pendant que ça
+roule). Écrit indépendamment des trames GPS (cadence horloge murale,
+pas calée sur `newGpsData`) pour rester utile même si le GPS a un
+souci.
+
+**Accès** : onglet **Firmware** du webserver → lien "Mode debug" en
+bas de page (`/debug`) → section dédiée "Logs diagnostic", séparée de
+la liste des sessions normales pour ne pas la polluer. Chaque fichier
+a un lien de téléchargement direct.
+
+**Nettoyage** : commande Serial `g` (efface tous les `/diag_*.csv`,
+même modèle que `c` pour les logs GPS) -- indépendante de `c` (logs
+GPS) et `x` (carnet de sessions `/sessions.csv`), fichiers
+complètement séparés sur le filesystem. Vérifié : le carnet de
+sessions ne référence jamais les noms de fichiers `diag_*.csv`
+(contrairement aux `log_*.csv` qu'il utilise pour son propre suivi),
+donc aucun risque d'effet de bord sur l'historique des tours en
+effaçant les logs diagnostic.
+
 ## Prochaines étapes
 
 - Page web `/circuits` pour éditer `circuits.csv` à chaud : ✅ fait,

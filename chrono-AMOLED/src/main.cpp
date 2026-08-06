@@ -696,6 +696,20 @@ static String formatCompactKeyShort(const String& key) {
 static File logFile;
 static bool loggingOk = false;
 static char currentLogPath[40] = "";
+
+// Log diagnostic periodique -- ajoute le 06/08 en vue du trajet longue
+// duree (900km A/R) : fichier separe et leger (1 ligne / 30s, pas a
+// 10Hz comme le log GPS) pour voir l'evolution dans le temps de la
+// batterie, temperature CPU, debit GPS reel, tas libre -- des infos
+// qu'on ne peut normalement observer qu'en direct sur l'ecran
+// Connexion ou via le serial, aucun des deux disponible pendant un
+// long trajet sans s'arreter. Ouvert/ferme avec l'enregistrement,
+// meme cycle de vie que logFile -- pas de nouveau mode a activer.
+static File diagFile;
+static bool diagLoggingOk = false;
+static char currentDiagLogPath[40] = "";
+static unsigned long lastDiagWriteMs = 0;
+static const unsigned long DIAG_WRITE_INTERVAL_MS = 30000UL;
 static char currentSessionCompactKey[16] = "";
 static bool recordingEnabled = false;
 static float currentLapMaxSpeedKmh = 0.0f; // remise a 0 a chaque tour termine (checkLapCompletion)
@@ -773,6 +787,7 @@ static double currentLapPrevLat = 0.0, currentLapPrevLng = 0.0;
 static char currentLapStartTimeStr[10] = "--:--:--"; // capturee sur la 1ere trame de chaque tour (cf. logGpsRow())
 static unsigned long lastLapMsSeen = 0xFFFFFFFFUL; // detecte le plateau/redemarrage de current_lap_ms (cf. logGpsRow())
 static void finalizeRouteSessionIfNeeded(); // definie plus bas -- forward-declaree pour etre appelable depuis stopRecording() (cf. fix ordre d'ecriture, 29/07)
+static int batteryVoltageToPercent(float v); // definie plus bas -- declaration anticipee, utilisee par logDiagRow() et getStatusCallback() avant sa definition
 // Angle max a droite/a gauche par tour -- leanAngleDeg positif = droite,
 // negatif = gauche (convention confirmee au banc le 29/07, cf.
 // ImuManager.cpp). On stocke l'angle a droite comme un max simple, et
@@ -806,6 +821,18 @@ static void startRecording() {
   logFile.println("local_time,millis_boot,lat,lng,speed_kmh,fix,sats,laps,circuit,current_lap_ms,lean_angle_deg,accel_x_mg,accel_y_mg,accel_z_mg,gyro_x_dps,gyro_y_dps,gyro_z_dps");
   logFile.flush();
   loggingOk = true;
+
+  snprintf(currentDiagLogPath, sizeof(currentDiagLogPath), "/diag_%s.csv", currentSessionCompactKey);
+  diagFile = gpsLogFs->open(currentDiagLogPath, "w");
+  if (diagFile) {
+    diagFile.println("local_time,uptime_s,batt_pct,batt_v,cpu_temp_c,free_heap,gps_hz,gps_fix,gps_sats,laps,detection_rejections");
+    diagFile.flush();
+    diagLoggingOk = true;
+    lastDiagWriteMs = 0; // force une premiere ligne rapidement plutot que d'attendre 30s
+  } else {
+    Serial.printf("REC : impossible de creer %s (log diag desactive pour cette session)\n", currentDiagLogPath);
+  }
+
   recordingEnabled = true;
   routeRecStartMs = millis(); // n'est utilise que si routeMode est actif, inoffensif sinon
   lastLapCount = 0;
@@ -831,6 +858,7 @@ static void startRecording() {
 static void stopRecording() {
   if (!recordingEnabled) return;
   if (loggingOk) { logFile.flush(); logFile.close(); loggingOk = false; }
+  if (diagLoggingOk) { diagFile.flush(); diagFile.close(); diagLoggingOk = false; }
   // IMPORTANT : appele ICI, avant "# session arretee" -- une version
   // precedente l'appelait seulement au moment de la confirmation d'arret
   // definitif (ancien ecran SCR_CONFIRM_STOP, retire le 05/08 -- cf.
@@ -927,6 +955,36 @@ static void logGpsRow() {
 
   static unsigned long lastFlush = 0;
   if (millis() - lastFlush >= 5000) { lastFlush = millis(); logFile.flush(); }
+}
+
+// Ligne de diagnostic systeme periodique -- separee du log GPS (cf.
+// DIAG_WRITE_INTERVAL_MS et commentaire pres de currentDiagLogPath).
+// Appelee depuis loop() independamment de newGpsData, sur une cadence
+// horloge murale plutot que calee sur les fixes GPS -- reste utile meme
+// si le GPS a un souci, ce qui est justement une partie de ce qu'on
+// veut pouvoir observer apres coup.
+static void logDiagRow() {
+  if (!diagLoggingOk) return;
+  if (millis() - lastDiagWriteMs < DIAG_WRITE_INTERVAL_MS) return;
+  lastDiagWriteMs = millis();
+
+  char timeBuf[10];
+  getLocalDateTime(nullptr, 0, timeBuf, sizeof(timeBuf));
+
+  float battV = 0; int battRaw = 0;
+  adc_get_value(&battV, &battRaw);
+  int battPct = batteryVoltageToPercent(battV);
+
+  unsigned long currentLapMs, bestLapMs; bool hasBest; int lapsCount;
+  getDisplayState(currentLapMs, bestLapMs, hasBest, lapsCount);
+
+  int rejections = courseManager ? courseManager->getDetectionRejectionCount() : 0;
+
+  diagFile.printf("%s,%lu,%d,%.2f,%.0f,%u,%.1f,%u,%u,%d,%d\n",
+                  timeBuf, millis() / 1000UL, battPct, battV, temperatureRead(),
+                  (unsigned)ESP.getFreeHeap(), gpsMeasuredRmcHz, gpsFixStatus, gpsNumSVs,
+                  lapsCount, rejections);
+  diagFile.flush(); // 1 ligne / 30s -- cout d'un flush systematique negligeable ici, contrairement au log GPS a 10Hz
 }
 
 static void checkLapCompletion() {
@@ -1029,8 +1087,6 @@ static void flushLogsCallback() {
   if (loggingOk) logFile.flush();
 }
 
-static int batteryVoltageToPercent(float v); // definie plus bas -- declaration anticipee pour getStatusCallback()
-
 static WebServerStatusInfo getStatusCallback() {
   WebServerStatusInfo s;
   s.bleConnected = gpsActive; // champ reutilise tel quel -- represente "GPS actif" ici
@@ -1123,12 +1179,33 @@ static void forEachGpsLogFile(Fn callback) {
   root.close();
 }
 
+// Meme principe, filtre sur /diag_ au lieu de /log_ -- logs diagnostic
+// periodiques (cf. section README "Log diagnostic periodique", 06/08).
+// Copie separee plutot que parametree sur le prefixe : deux fonctions
+// courtes et lisibles valent mieux qu'un parametre supplementaire pour
+// un usage aussi ponctuel (commande serial 'g' uniquement).
+template<typename Fn>
+static void forEachDiagLogFile(Fn callback) {
+  File root = gpsLogFs->open("/");
+  if (!root || !root.isDirectory()) return;
+  File f = root.openNextFile();
+  while (f) {
+    String name = f.name();
+    if (!name.startsWith("/")) name = "/" + name;
+    if (name.indexOf("/diag_") >= 0 && name.endsWith(".csv")) callback(name, (uint32_t)f.size());
+    f.close();
+    f = root.openNextFile();
+  }
+  root.close();
+}
+
 static void printSerialCommandsHelp() {
   Serial.println("=== Commandes Serial disponibles (tape la lettre, pas besoin d'Entree) ===");
   Serial.println("  l : liste les logs GPS detailles (SD ou LittleFS)");
   Serial.println("  d : dump du log en cours/dernier ferme");
   Serial.println("  s : dump du carnet de sessions (/sessions.csv)");
   Serial.println("  c : efface tous les logs GPS detailles");
+  Serial.println("  g : efface tous les logs diagnostic (/diag_*.csv) -- ne touche ni aux logs GPS ni au carnet de sessions");
   Serial.println("  x : efface le carnet de sessions (/sessions.csv)");
   Serial.println("  b : tension/pourcentage batterie");
   Serial.println("  i : angle d'inclinaison + valeurs brutes IMU (accelero/gyro)");
@@ -1183,6 +1260,22 @@ static void handleSerialCommands() {
     for (int i = 0; i < count; i++) gpsLogFs->remove(toDelete[i]);
     currentLogPath[0] = '\0';
     Serial.printf("%d fichier(s) de log GPS efface(s).\n", count);
+
+  } else if (c == 'g') {
+    // Efface uniquement /diag_*.csv -- ne touche ni aux logs GPS
+    // detailles (log_*.csv, cf. 'c') ni au carnet de sessions cumulatif
+    // (/sessions.csv, cf. 'x'), fichiers completement independants sur
+    // le filesystem (aucun des deux ne referencie les noms de fichiers
+    // diag_*.csv, contrairement au carnet qui liste les log_*.csv).
+    if (recordingEnabled) stopRecording(); // ferme aussi le diagFile en cours, cf. stopRecording()
+    String toDelete[20];
+    int count = 0;
+    forEachDiagLogFile([&](const String& name, uint32_t size) {
+      if (count < 20) toDelete[count++] = name;
+    });
+    for (int i = 0; i < count; i++) gpsLogFs->remove(toDelete[i]);
+    currentDiagLogPath[0] = '\0';
+    Serial.printf("%d fichier(s) de log diagnostic efface(s).\n", count);
 
   } else if (c == 'x') {
     // Repris de la variante OLED (absent du TFT) -- efface le carnet
@@ -2268,6 +2361,8 @@ void loop() {
     logGpsRow();          // no-op si REC off
     checkLapCompletion();  // no-op si REC off
   }
+
+  logDiagRow(); // no-op si REC off ou avant l'intervalle -- volontairement hors du bloc newGpsData, cf. commentaire pres de sa definition
 
   if (lvglLock(10)) {
     if (pushButtonPressed) {
