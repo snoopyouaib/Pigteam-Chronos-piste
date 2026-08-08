@@ -6,9 +6,10 @@
 //
 // Portage direct depuis le projet chrono GPS TFT (meme interface, meme
 // structure GpsData) -- seuls les pins changent (cf. GpsManager.cpp),
-// adaptes au brochage TXD/RXD dedie de la carte AMOLED 1.64
-// (GPIO43/44, UART0, libre car le monitoring serie passe par l'USB
-// natif de ce board).
+// adaptes au brochage TXD/RXD dedie de la carte AMOLED 1.91
+// (GPIO12/13, UART1 -- deplace de GPIO43/44 le 04/08, cf. README
+// section "Diagnostic GPS bloque a 1Hz"). Le monitoring serie de debug
+// passe par l'USB natif de ce board, sans conflit avec cet UART.
 
 struct GpsData {
   uint16_t year;
@@ -44,6 +45,12 @@ extern float gpsMeasuredRmcHz;
 // gpsMeasuredRmcHz -- un module peut acquitter sans reellement changer
 // de cadence, cf. diagnostic 04/08, d'ou les deux indicateurs distincts).
 extern bool gpsFixRateAckOk;
+
+// Compteur brut de trames RMC recues depuis le boot -- incremente en
+// continu par parseRMC() (cf. GpsManager.cpp). Sert de base a un calcul
+// de debit periodique cote main.cpp (delta / temps ecoule), sans jamais
+// bloquer le flux GPS reel comme le ferait measureActualRmcRate().
+extern uint32_t gpsRmcSentenceCount;
 
 // Configure et demarre le module GPS -- a appeler une fois dans setup().
 void initGps();

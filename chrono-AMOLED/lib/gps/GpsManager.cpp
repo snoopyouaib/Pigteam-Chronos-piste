@@ -6,8 +6,10 @@
 //
 // Portage du GpsManager.cpp du projet chrono GPS TFT -- meme interface
 // GpsManager.h, meme logique de parsing NMEA (RMC/GGA/GSA). Seul le
-// brochage change : broches TXD/RXD dediees de la carte AMOLED 1.64
-// (GPIO43/44, UART0) au lieu des GPIO5/6 du montage Tiny N8R8.
+// brochage change : broches TXD/RXD dediees de la carte AMOLED 1.91
+// (GPIO12/13, UART1 -- deplace de GPIO43/44 le 04/08, cf. README
+// section "Diagnostic GPS bloque a 1Hz") au lieu des GPIO5/6 du
+// montage Tiny N8R8.
 
 #define GPS_RX_PIN 12  // <- TX du module GPS -- deplace de 44 (test bout de fil TX/RX mort sur 43/44, cf. diagnostic 04/08)
 #define GPS_TX_PIN 13  // -> RX du module GPS -- deplace de 43
@@ -248,7 +250,22 @@ static int32_t parseNmeaCoord(const char* coordField, const char* dirField) {
 }
 
 // $xxRMC,hhmmss.ss,A,llll.ll,a,yyyyy.yy,a,x.x,x.x,ddmmyy,x.x,a,mode*hh
+// Compteur de trames RMC recues, incremente ici quelle que soit la
+// validite du fix -- meme logique que measureActualRmcRate() (qui
+// comptait toute trame RMC recue, cf. plus haut), pour rester
+// comparable. Expose (cf. GpsManager.h) pour un calcul de debit
+// periodique cote main.cpp SANS bloquer le parsing GPS reel -- contrairement
+// a measureActualRmcRate() qui bloque 2s en lecture directe du port,
+// acceptable une seule fois au boot (avant que loop()/CourseManager ne
+// tournent) mais PAS pendant une session en cours (ca volerait des
+// trames reelles au parsing, risque concret de rater un franchissement
+// de ligne a haute vitesse). uint32_t suffit largement : a 10Hz continu,
+// le débordement (4.3 milliards) prendrait ~13 ans.
+uint32_t gpsRmcSentenceCount = 0;
+
 static void parseRMC(char* fields) {
+  gpsRmcSentenceCount++;
+
   char* time_  = nextField(&fields);
   char* status = nextField(&fields);
   char* lat    = nextField(&fields);

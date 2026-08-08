@@ -690,6 +690,49 @@ sessions ne référence jamais les noms de fichiers `diag_*.csv`
 donc aucun risque d'effet de bord sur l'historique des tours en
 effaçant les logs diagnostic.
 
+## Débit GPS figé + affichage Route au-delà d'une heure (07/08)
+
+Suite au trajet 900km A/R : deux bugs distincts remontés par les logs
+diagnostic et l'usage réel.
+
+**1. `gps_hz` figé depuis le boot.** `measureActualRmcRate()` ne
+tournait qu'une fois au démarrage (fenêtre bloquante de 2s), donc
+`gpsMeasuredRmcHz` restait à la valeur mesurée au boot pendant toute la
+durée d'une session -- le diag log affichait `9.5` en continu sur 4h30
+sans que ça reflète un vrai suivi. Un vrai décrochage GPS à 1Hz en
+cours de route (ex. re-défaillance du point de soudure TX sous
+chaleur/vibration prolongée) n'aurait pas été détecté par cette
+colonne. Corrigé par un compteur (`gpsRmcSentenceCount`, incrémenté
+dans `parseRMC()`) recalculé toutes les 10s dans `loop()` -- delta /
+temps écoulé, **aucune lecture bloquante**, contrairement à
+`measureActualRmcRate()` qu'il aurait été dangereux de rappeler
+pendant une session (2s de trames réelles perdues à chaque appel,
+risque concret de rater un franchissement de ligne à haute vitesse).
+`measureActualRmcRate()` reste utilisée telle quelle au boot (contexte
+acceptable, rien d'autre ne tourne encore) ; le nouveau mécanisme prend
+le relais ensuite en continu, alimentant à la fois l'écran Connexion et
+le log diagnostic avec une valeur réellement live.
+
+**2. Chrono Route affichant `244:59.439` au lieu de `4:04:59.439`.**
+`formatLapTime()` n'a jamais géré les heures (raisonnable pour un vrai
+temps au tour, toujours << 60 min, mais pas pour le compteur cumulatif
+du mode Route sur un trajet long). Corrigé : bascule automatique en
+`H:MM:SS.mmm` au-delà de 60 minutes, sinon comportement inchangé.
+Effet de bord identifié et corrigé en cascade : `sessions.csv` stocke
+la durée Route via cette même fonction, et le parseur inverse
+(`parseLapTimeStr()`) supposait strictement le format sans heures --
+aurait mal réinterprété un temps `H:MM:SS.mmm` stocké. Même paire de
+fonctions dupliquée côté `WebServerManager.cpp`
+(`msToLapTime()`/`lapTimeToMsSimple()`, implémentation indépendante,
+pas de code partagé entre firmware et webserver) -- corrigée en
+parallèle pour rester cohérente, sinon la page web aurait affiché/lu
+faux sur les mêmes trajets longs.
+
+**Point ouvert, non traité ici** : `pigteam-analyse` (Streamlit, code
+Python séparé) parse aussi `sessions.csv` -- à vérifier si elle gère
+le format `H:MM:SS.mmm` pour l'import de trajets Route > 1h, sinon même
+classe de bug côté PC.
+
 ## Prochaines étapes
 
 - Page web `/circuits` pour éditer `circuits.csv` à chaud : ✅ fait,

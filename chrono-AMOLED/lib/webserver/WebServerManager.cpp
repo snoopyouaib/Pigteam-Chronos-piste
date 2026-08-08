@@ -423,10 +423,22 @@ static SessionSummaryLite findSummaryForFile(const std::vector<SessionSummaryLit
 
 static String msToLapTime(long ms) {
   if (ms < 0) return "--:--.---";
-  long minutes = ms / 60000L;
+  long totalMinutes = ms / 60000L;
   float seconds = (ms % 60000L) / 1000.0f;
-  char buf[16];
-  snprintf(buf, sizeof(buf), "%ld:%06.3f", minutes, seconds);
+  char buf[20];
+  if (totalMinutes >= 60) {
+    // Bascule H:MM:SS.mmm au-dela d'une heure -- meme logique que
+    // formatLapTime() cote firmware (cf. section README "Suppression du
+    // mode Pause"... section GPS/07-08, trajets Route > 1h). Les deux
+    // implementations sont independantes (fichiers separes, pas de code
+    // partage entre firmware et webserver) mais doivent rester
+    // coherentes puisqu'elles lisent/ecrivent le meme sessions.csv.
+    long hours = totalMinutes / 60;
+    long minutes = totalMinutes % 60;
+    snprintf(buf, sizeof(buf), "%ld:%02ld:%06.3f", hours, minutes, seconds);
+  } else {
+    snprintf(buf, sizeof(buf), "%ld:%06.3f", totalMinutes, seconds);
+  }
   return String(buf);
 }
 
@@ -437,14 +449,23 @@ static String msToLapTime(long ms) {
 // uniquement pour reperer le meilleur temps de la session en une passe
 // (cf. handleLapTracePage()), donc meme profil memoire que le reste des
 // fonctions de ce fichier deja jugees saines (parsing ligne par ligne,
-// aucune accumulation).
+// aucune accumulation). Gere "M:SS.mmm" et "H:MM:SS.mmm" (07/08).
 static long lapTimeToMsSimple(const String& t) {
-  int colon = t.indexOf(':');
-  if (colon < 0) return -1;
-  long minutes = t.substring(0, colon).toInt();
-  float seconds = t.substring(colon + 1).toFloat();
+  int firstColon = t.indexOf(':');
+  if (firstColon < 0) return -1;
+  int secondColon = t.indexOf(':', firstColon + 1);
+  long hours = 0, minutes;
+  float seconds;
+  if (secondColon >= 0) {
+    hours = t.substring(0, firstColon).toInt();
+    minutes = t.substring(firstColon + 1, secondColon).toInt();
+    seconds = t.substring(secondColon + 1).toFloat();
+  } else {
+    minutes = t.substring(0, firstColon).toInt();
+    seconds = t.substring(firstColon + 1).toFloat();
+  }
   if (seconds < 0) return -1;
-  return minutes * 60000L + (long)(seconds * 1000.0f + 0.5f);
+  return hours * 3600000L + minutes * 60000L + (long)(seconds * 1000.0f + 0.5f);
 }
 
 // Extrait "AAAAMMJJHHMMSS" depuis "/log_AAAAMMJJ_HHMMSS.csv"
