@@ -97,6 +97,16 @@ static const unsigned long PUSH_DEBOUNCE_MS = 200;
 static const unsigned long BACK_HOLD_STOP_MS = 700;
 static unsigned long backHoldStopPendingSinceMs = 0; // 0 = pas d'appui BACK en attente de confirmation
 
+// Recalcul periodique du debit RMC reel (07/08, suite au constat que
+// gps_hz restait fige a la valeur du boot pendant tout le trajet de
+// 900km, cf. section README correspondante). Base sur
+// gpsRmcSentenceCount (simple delta / temps ecoule), jamais de lecture
+// bloquante du port GPS -- n'entre jamais en concurrence avec le
+// parsing reel des trames.
+static uint32_t lastRmcCountSnapshot = 0;
+static unsigned long lastRmcHzUpdateMs = 0;
+static const unsigned long RMC_HZ_UPDATE_INTERVAL_MS = 10000UL;
+
 void IRAM_ATTR backButtonISR() {
   unsigned long now = millis();
   if (now - lastBackIsrMs < BACK_DEBOUNCE_MS) return;
@@ -113,10 +123,21 @@ void IRAM_ATTR pushButtonISR() {
 // mm:ss.mmm
 static void formatLapTime(unsigned long ms, char* buf, size_t bufSize) {
   if (ms == 0) { snprintf(buf, bufSize, "--:--.---"); return; }
-  unsigned long minutes = ms / 60000;
+  unsigned long totalMinutes = ms / 60000;
   unsigned long seconds = (ms / 1000) % 60;
   unsigned long millisPart = ms % 1000;
-  snprintf(buf, bufSize, "%lu:%02lu.%03lu", minutes, seconds, millisPart);
+  if (totalMinutes >= 60) {
+    // Bascule H:MM:SS.mmm au-dela d'une heure -- ajoute le 07/08 suite
+    // au trajet de 900km, ou le chrono Route affichait "244:59.439" au
+    // lieu de repasser en heures. N'affecte jamais les vrais temps au
+    // tour (toujours tres en dessous de 60 minutes en usage normal),
+    // seulement le compteur cumulatif du mode Route sur trajet long.
+    unsigned long hours = totalMinutes / 60;
+    unsigned long minutes = totalMinutes % 60;
+    snprintf(buf, bufSize, "%lu:%02lu:%02lu.%03lu", hours, minutes, seconds, millisPart);
+  } else {
+    snprintf(buf, bufSize, "%lu:%02lu.%03lu", totalMinutes, seconds, millisPart);
+  }
 }
 
 // ===================== Cache GPS local (fixStatus/numSVs/vitesse) =====================
@@ -185,17 +206,27 @@ static void getLocalDateTimeCompact(char* buf, size_t bufSize) {
            localTm.tm_hour, localTm.tm_min, localTm.tm_sec);
 }
 
-// Inverse de formatLapTime() -- "M:SS.mmm" -> millisecondes. ULONG_MAX si
-// le format ne correspond pas (ex. "--:--.---" = pas de temps).
+// Inverse de formatLapTime() -- "M:SS.mmm" ou "H:MM:SS.mmm" (07/08,
+// cf. formatLapTime() -- trajets Route > 1h) -> millisecondes.
+// ULONG_MAX si le format ne correspond a aucun des deux (ex.
+// "--:--.---" = pas de temps).
 static unsigned long parseLapTimeStr(const String& s) {
-  int colon = s.indexOf(':');
+  int firstColon = s.indexOf(':');
   int dot = s.indexOf('.');
-  if (colon < 0 || dot < 0) return ULONG_MAX;
-  long minutes = s.substring(0, colon).toInt();
-  long seconds = s.substring(colon + 1, dot).toInt();
-  long millisPart = s.substring(dot + 1).toInt();
-  if (minutes == 0 && seconds == 0 && millisPart == 0 && s.charAt(0) != '0') return ULONG_MAX;
-  return (unsigned long)(minutes * 60000 + seconds * 1000 + millisPart);
+  if (firstColon < 0 || dot < 0) return ULONG_MAX;
+  int secondColon = s.indexOf(':', firstColon + 1);
+  long hours = 0, minutes, seconds, millisPart;
+  if (secondColon >= 0 && secondColon < dot) {
+    hours = s.substring(0, firstColon).toInt();
+    minutes = s.substring(firstColon + 1, secondColon).toInt();
+    seconds = s.substring(secondColon + 1, dot).toInt();
+  } else {
+    minutes = s.substring(0, firstColon).toInt();
+    seconds = s.substring(firstColon + 1, dot).toInt();
+  }
+  millisPart = s.substring(dot + 1).toInt();
+  if (hours == 0 && minutes == 0 && seconds == 0 && millisPart == 0 && s.charAt(0) != '0') return ULONG_MAX;
+  return (unsigned long)(hours * 3600000UL + minutes * 60000 + seconds * 1000 + millisPart);
 }
 
 // ===================== CourseManager (detection auto / mode proximite) =====================
@@ -2363,6 +2394,22 @@ void loop() {
   }
 
   logDiagRow(); // no-op si REC off ou avant l'intervalle -- volontairement hors du bloc newGpsData, cf. commentaire pres de sa definition
+
+  // Idem : recalcul du debit RMC reel, hors du bloc newGpsData (doit
+  // tourner meme si le GPS ne recoit plus rien du tout -- delta=0 =>
+  // gpsMeasuredRmcHz=0, plus informatif que de rester fige sur l'ancienne
+  // valeur). Tourne en continu, pas seulement pendant l'enregistrement --
+  // alimente aussi l'ecran Connexion en direct.
+  {
+    unsigned long nowMsRmc = millis();
+    if (nowMsRmc - lastRmcHzUpdateMs >= RMC_HZ_UPDATE_INTERVAL_MS) {
+      unsigned long elapsed = nowMsRmc - lastRmcHzUpdateMs;
+      uint32_t delta = gpsRmcSentenceCount - lastRmcCountSnapshot; // arithmetique non signee -- correct meme en cas de wrap (~13 ans a 10Hz, jamais en pratique)
+      gpsMeasuredRmcHz = elapsed > 0 ? (delta * 1000.0f / (float)elapsed) : 0.0f;
+      lastRmcCountSnapshot = gpsRmcSentenceCount;
+      lastRmcHzUpdateMs = nowMsRmc;
+    }
+  }
 
   if (lvglLock(10)) {
     if (pushButtonPressed) {
