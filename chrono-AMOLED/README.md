@@ -733,6 +733,45 @@ Python séparé) parse aussi `sessions.csv` -- à vérifier si elle gère
 le format `H:MM:SS.mmm` pour l'import de trajets Route > 1h, sinon même
 classe de bug côté PC.
 
+## Onglet Route séparé sur le webserver (07/08)
+
+Les sorties Route (parcours libre, sans détection de tour -- usage
+route/vélo) étaient mélangées avec les sessions piste/circuit dans le
+même onglet "Sessions". Séparation demandée pour éviter le mélange des
+genres.
+
+**Fix** : rendu de la liste factorisé dans `renderSessionsList(bool
+routeOnly)` (partagé entre `handleHomePage()` et le nouveau
+`handleRoutePage()`), filtré via `isRouteSummary()` déjà existante.
+Nouvel onglet **Route** dans la nav, entre Sessions et Circuits.
+`handleLapTracePage()` (détail d'une session) bascule l'onglet actif
+et le lien retour selon le type. Un fichier sans résumé exploitable
+(`lapCount == 0`) est classé par défaut côté Sessions, faute de pouvoir
+déterminer son type.
+
+Même contrainte mémoire respectée que l'original (streaming
+`sendContent()` ligne par ligne, jamais d'accumulation complète -- cf.
+le crash de tas déjà documenté plus haut) : la factorisation ne change
+rien à ce point, juste un paramètre de filtre ajouté à la boucle
+existante.
+
+**Limite mineure connue, non traitée** : la suppression d'une session
+Route depuis `/route` redirige après redémarrage vers l'onglet
+Sessions (comportement hérité, `restartToApplyChange("home", ...)`
+non rendu dynamique) -- juste un clic de plus pour revenir sur Route,
+pas un bug fonctionnel. Sans objet en pratique pour un usage via
+`/debug` (voir ci-dessous), qui redirige déjà vers Sessions dans tous
+les cas.
+
+**Liste à cocher `/debug` scindée en deux (07/08)** : même séparation
+que les onglets, appliquée à la liste de nettoyage groupé (cases à
+cocher + suppression en une fois) -- deux sous-sections "Sessions
+piste/circuit" et "Sorties Route", chacune avec son propre suivi de
+date, pour éviter de cocher une sortie Route par erreur en pensant
+nettoyer des sessions piste (ou l'inverse). Un seul formulaire englobe
+toujours les deux groupes -- `/debug/delete-sessions` traite tous les
+`keys` cochés sans distinction de section.
+
 ## Prochaines étapes
 
 - Page web `/circuits` pour éditer `circuits.csv` à chaud : ✅ fait,

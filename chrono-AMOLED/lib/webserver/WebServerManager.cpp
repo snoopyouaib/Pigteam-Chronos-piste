@@ -572,6 +572,7 @@ static String pageHeader(const char* activeTab) {
   html += "</style></head><body>";
   html += "<nav>";
   html += "<a href='/'"; if (strcmp(activeTab, "home") == 0) html += " class='active'"; html += ">Sessions</a>";
+  html += "<a href='/route'"; if (strcmp(activeTab, "route") == 0) html += " class='active'"; html += ">Route</a>";
   html += "<a href='/circuits'"; if (strcmp(activeTab, "circuits") == 0) html += " class='active'"; html += ">Circuits</a>";
   html += "<a href='/status'"; if (strcmp(activeTab, "status") == 0) html += " class='active'"; html += ">Statut</a>";
   html += "<a href='/import'"; if (strcmp(activeTab, "import") == 0) html += " class='active'"; html += ">Import</a>";
@@ -987,6 +988,105 @@ static String storageBarHtml(const char* label, uint64_t used, uint64_t total) {
   return html;
 }
 
+// Rend la liste streamee des sessions, filtree par type -- factorise
+// depuis handleHomePage() (07/08, cf. section README "Separation
+// Route/Sessions") pour la partager avec handleRoutePage(). Meme
+// contrainte memoire que l'original : jamais de conteneur qui grossit
+// avec le nombre de sessions, chaque carte envoyee au fur et a mesure
+// (streaming chunked, cf. commentaire plus bas sur le crash de tas
+// deja rencontre avec l'accumulation complete).
+//
+// Un fichier sans resume (summary.lapCount == 0, ex. les sessions
+// parasites de quelques secondes vues avant le retrait du mode Pause,
+// cf. section correspondante) est classe cote Sessions par defaut
+// (routeOnly=false) faute de pouvoir determiner son type -- jamais
+// perdu, juste range du cote le plus sur en cas de doute.
+static void renderSessionsList(bool routeOnly) {
+  std::vector<SessionSummaryLite> summaries = loadSessionSummaries();
+
+  std::vector<std::pair<String, uint32_t>> files;
+  forEachGpsLogFile([&](const String& name, uint32_t size) { files.push_back({name, size}); });
+  std::sort(files.begin(), files.end(), [](const std::pair<String,uint32_t>& a, const std::pair<String,uint32_t>& b) {
+    return a.first > b.first; // ordre decroissant -- plus recent en premier
+  });
+
+  String html;
+  bool anyRendered = false;
+  String lastDateShown = "";
+  for (size_t i = 0; i < files.size(); i++) {
+    String compactKey = compactKeyFromLogFilename(files[i].first);
+    SessionSummaryLite summary = findSummaryForFile(summaries, compactKey);
+    bool isRoute = summary.lapCount > 0 && isRouteSummary(summary);
+    if (isRoute != routeOnly) continue; // filtre -- pas la bonne liste pour cette page
+
+    anyRendered = true;
+    String dateCompact8 = compactKey.substring(0, 8);
+    String timeCompact6 = compactKey.length() >= 14 ? compactKey.substring(8, 14) : "";
+
+    if (dateCompact8 != lastDateShown) {
+      html += "<h3>" + prettyDate(dateCompact8) + "</h3>";
+      lastDateShown = dateCompact8;
+    }
+
+    String shortName = files[i].first.substring(1);
+
+    html += "<div class='card' style='display:block'><div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px'><div>";
+    html += "<b>" + prettyTime(timeCompact6) + "</b>";
+    html += "<div class='meta'>";
+    if (summary.lapCount > 0) {
+      if (isRoute) {
+        html += "Route -- duree " + summary.bestLapTime;
+        if (summary.lastDistanceKm.length()) html += " -- " + summary.lastDistanceKm + " km";
+        if (summary.lastAvgSpeedKmh.length()) html += " -- V.moy " + summary.lastAvgSpeedKmh + " km/h";
+      } else {
+        html += String(summary.lapCount) + " tour(s) -- meilleur : " + summary.bestLapTime;
+        if (summary.circuit.length()) html += " -- " + summary.circuit;
+      }
+    } else {
+      html += "(pas de resume disponible)";
+    }
+    html += " -- " + String(files[i].second) + " octets</div></div>";
+    html += "<div style='display:flex;gap:8px'>";
+    html += "<a class='file' href='/download?file=" + shortName + "'>Telecharger</a>";
+    html += "<form action='/delete' method='GET' onsubmit=\"return confirm('Supprimer cette session ? Irreversible.');\">";
+    html += "<input type='hidden' name='file' value='" + shortName + "'>";
+    html += "<button type='submit'>Supprimer</button></form>";
+    html += "</div></div>";
+
+    // ----- Tableau par tour + graphique -- DESACTIVE TEMPORAIREMENT -----
+    //
+    // Plante de facon reproductible sur certaines sessions reelles
+    // (constate au banc : String corrompue en retour de
+    // loadLapsForSession(), cause exacte non identifiee malgre plusieurs
+    // pistes eliminees -- pile agrandie sans effet, format CSV verifie
+    // sain a l'octet pres. Necessiterait un vrai debogueur JTAG/GDB pour
+    // etre isole precisement, pas fait a ce stade). En attendant : la
+    // page d'accueil n'affiche plus que le resume (deja disponible via
+    // loadSessionSummaries(), jamais implique dans le plantage) -- le
+    // detail tour par tour reste consultable via la page /lap dediee.
+    // Lien vers /lap -- desormais protege par la quarantaine dans
+    // loadLapsForSession() (cf. cette fonction) pour la session
+    // precise qui declenchait le bug memoire non resolu.
+    if (summary.lapCount > 0) {
+      String linkLabel = isRoute ? "Voir le detail du parcours &rarr;" : "Voir le detail des tours &rarr;";
+      html += "<p style='margin-top:8px'><a class='file' href='/lap?file=" + shortName + "&lap=1'>" + linkLabel + "</a></p>";
+    }
+
+    html += "</div>";
+
+    // Fin de traitement de cette session -- on envoie ce qu'on a
+    // accumule pour elle et on repart d'une String vide pour la
+    // suivante, plutot que de laisser grossir indefiniment.
+    httpServer.sendContent(html);
+    html = "";
+  }
+
+  if (!anyRendered) {
+    html += "<p><i>(aucune " + String(routeOnly ? "sortie Route" : "session") + " enregistree pour l'instant)</i></p>";
+    httpServer.sendContent(html);
+  }
+}
+
 static void handleHomePage() {
   String html = pageHeader("home");
   html += "<h2>Sessions enregistrees</h2>";
@@ -1030,84 +1130,28 @@ static void handleHomePage() {
   httpServer.sendContent(html);
   html = "";
 
-  std::vector<SessionSummaryLite> summaries = loadSessionSummaries();
+  renderSessionsList(false); // sessions piste/circuit uniquement -- Route separe, cf. handleRoutePage()
 
-  // Recupere tous les fichiers GPS detailles, tries du plus recent au plus ancien
-  // (les noms "log_AAAAMMJJ_HHMMSS.csv" se comparent dans le bon ordre en texte).
-  std::vector<std::pair<String, uint32_t>> files;
-  forEachGpsLogFile([&](const String& name, uint32_t size) { files.push_back({name, size}); });
-  std::sort(files.begin(), files.end(), [](const std::pair<String,uint32_t>& a, const std::pair<String,uint32_t>& b) {
-    return a.first > b.first; // ordre decroissant -- plus recent en premier
-  });
+  html += PAGE_FOOTER;
+  httpServer.sendContent(html);
+}
 
-  if (files.empty()) {
-    html += "<p><i>(aucune session GPS enregistree pour l'instant)</i></p>";
-  } else {
-    String lastDateShown = "";
-    for (size_t i = 0; i < files.size(); i++) {
-      String compactKey = compactKeyFromLogFilename(files[i].first);
-      String dateCompact8 = compactKey.substring(0, 8);
-      String timeCompact6 = compactKey.length() >= 14 ? compactKey.substring(8, 14) : "";
+// Onglet separe pour les sorties Route (07/08) -- meme structure que
+// Sessions mais filtree sur isRouteSummary(), pour eviter le melange
+// entre temps au tour (piste) et trajets libres (route/velo). Pas de
+// barres de stockage/carnet ici (deja sur l'onglet Sessions, pas de
+// raison de les dupliquer) -- juste la liste filtree.
+static void handleRoutePage() {
+  String html = pageHeader("route");
+  html += "<h2>Sorties Route</h2>";
+  html += "<p class='meta' style='opacity:0.75'>Trajets enregistres en mode Route (parcours libre, sans detection de tour) -- separes des sessions piste/circuit.</p>";
 
-      if (dateCompact8 != lastDateShown) {
-        html += "<h3>" + prettyDate(dateCompact8) + "</h3>";
-        lastDateShown = dateCompact8;
-      }
+  httpServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  httpServer.send(200, "text/html", "");
+  httpServer.sendContent(html);
+  html = "";
 
-      SessionSummaryLite summary = findSummaryForFile(summaries, compactKey);
-      String shortName = files[i].first.substring(1);
-
-      html += "<div class='card' style='display:block'><div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px'><div>";
-      html += "<b>" + prettyTime(timeCompact6) + "</b>";
-      html += "<div class='meta'>";
-      if (summary.lapCount > 0) {
-        if (isRouteSummary(summary)) {
-          html += "Route -- duree " + summary.bestLapTime;
-          if (summary.lastDistanceKm.length()) html += " -- " + summary.lastDistanceKm + " km";
-          if (summary.lastAvgSpeedKmh.length()) html += " -- V.moy " + summary.lastAvgSpeedKmh + " km/h";
-        } else {
-          html += String(summary.lapCount) + " tour(s) -- meilleur : " + summary.bestLapTime;
-          if (summary.circuit.length()) html += " -- " + summary.circuit;
-        }
-      } else {
-        html += "(pas de resume disponible)";
-      }
-      html += " -- " + String(files[i].second) + " octets</div></div>";
-      html += "<div style='display:flex;gap:8px'>";
-      html += "<a class='file' href='/download?file=" + shortName + "'>Telecharger</a>";
-      html += "<form action='/delete' method='GET' onsubmit=\"return confirm('Supprimer cette session ? Irreversible.');\">";
-      html += "<input type='hidden' name='file' value='" + shortName + "'>";
-      html += "<button type='submit'>Supprimer</button></form>";
-      html += "</div></div>";
-
-      // ----- Tableau par tour + graphique -- DESACTIVE TEMPORAIREMENT -----
-      //
-      // Plante de facon reproductible sur certaines sessions reelles
-      // (constate au banc : String corrompue en retour de
-      // loadLapsForSession(), cause exacte non identifiee malgre plusieurs
-      // pistes eliminees -- pile agrandie sans effet, format CSV verifie
-      // sain a l'octet pres. Necessiterait un vrai debogueur JTAG/GDB pour
-      // etre isole precisement, pas fait a ce stade). En attendant : la
-      // page d'accueil n'affiche plus que le resume (deja disponible via
-      // loadSessionSummaries(), jamais implique dans le plantage) -- le
-      // detail tour par tour reste consultable via la page /lap dediee.
-      // Lien vers /lap -- desormais protege par la quarantaine dans
-      // loadLapsForSession() (cf. cette fonction) pour la session
-      // precise qui declenchait le bug memoire non resolu.
-      if (summary.lapCount > 0) {
-        String linkLabel = isRouteSummary(summary) ? "Voir le detail du parcours &rarr;" : "Voir le detail des tours &rarr;";
-        html += "<p style='margin-top:8px'><a class='file' href='/lap?file=" + shortName + "&lap=1'>" + linkLabel + "</a></p>";
-      }
-
-      html += "</div>";
-
-      // Fin de traitement de cette session -- on envoie ce qu'on a
-      // accumule pour elle et on repart d'une String vide pour la
-      // suivante, plutot que de laisser grossir indefiniment.
-      httpServer.sendContent(html);
-      html = "";
-    }
-  }
+  renderSessionsList(true);
 
   html += PAGE_FOOTER;
   httpServer.sendContent(html);
@@ -1264,9 +1308,9 @@ static void handleLapTracePage() {
     }
   }
 
-  String html = pageHeader("home");
+  String html = pageHeader(isRoute ? "route" : "home");
   html += isRoute ? "<h2>Detail du parcours (mode Route)</h2>" : "<h2>Tours de la session</h2>";
-  html += "<p class='meta' style='opacity:0.75'>" + compareFileLabel(file) + " -- <a class='file' href='/'>&larr; retour aux sessions</a></p>";
+  html += "<p class='meta' style='opacity:0.75'>" + compareFileLabel(file) + " -- <a class='file' href='" + (isRoute ? "/route" : "/") + "'>&larr; retour aux sessions</a></p>";
 
   httpServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
   httpServer.send(200, "text/html", "");
@@ -1516,36 +1560,54 @@ static void handleDebugPage() {
   std::sort(summaries.begin(), summaries.end(), [](const SessionSummaryLite& a, const SessionSummaryLite& b) {
     return a.compactKey > b.compactKey; // "AAAAMMJJHHMMSS" se compare correctement en texte
   });
-  html += "<h3 style='margin-top:20px'>Sessions du carnet (" + String(summaries.size()) + ")</h3>";
+
+  // Scinde en deux sous-sections (07/08) -- meme separation que les
+  // onglets /route et / (cf. section README correspondante), pour
+  // eviter de cocher par erreur une sortie Route en pensant nettoyer
+  // des sessions piste ou inversement. Un seul <form> englobe quand
+  // meme les deux groupes : /debug/delete-sessions lit tous les "keys"
+  // coches sans se soucier de leur section d'origine.
+  size_t routeCount = 0, sessionCount = 0;
+  for (const SessionSummaryLite& s : summaries) { if (isRouteSummary(s)) routeCount++; else sessionCount++; }
+
   if (summaries.empty()) {
+    html += "<h3 style='margin-top:20px'>Sessions du carnet (0)</h3>";
     html += "<p><i>(carnet vide)</i></p>";
   } else {
     html += "<form action='/debug/delete-sessions' method='GET' onsubmit=\"return confirm('Retirer les sessions cochees du carnet ET leurs logs GPS associes ? Irreversible.');\">";
-    String lastDateShown = "";
-    for (const SessionSummaryLite& s : summaries) {
-      String dateCompact8 = s.compactKey.length() >= 8 ? s.compactKey.substring(0, 8) : "";
-      if (dateCompact8.length() == 8 && dateCompact8 != lastDateShown) {
-        html += "<h4 style='margin:14px 0 4px;opacity:0.75'>" + prettyDate(dateCompact8) + "</h4>";
-        lastDateShown = dateCompact8;
+
+    auto renderGroup = [&](bool routeOnly, const char* title, size_t count) {
+      html += "<h3 style='margin-top:20px'>" + String(title) + " (" + String(count) + ")</h3>";
+      if (count == 0) { html += "<p><i>(aucune)</i></p>"; return; }
+      String lastDateShown = "";
+      for (const SessionSummaryLite& s : summaries) {
+        if (isRouteSummary(s) != routeOnly) continue;
+        String dateCompact8 = s.compactKey.length() >= 8 ? s.compactKey.substring(0, 8) : "";
+        if (dateCompact8.length() == 8 && dateCompact8 != lastDateShown) {
+          html += "<h4 style='margin:14px 0 4px;opacity:0.75'>" + prettyDate(dateCompact8) + "</h4>";
+          lastDateShown = dateCompact8;
+        }
+        String label = (s.compactKey.length() >= 14) ? prettyTime(s.compactKey.substring(8, 14)) : s.compactKey;
+        bool logFileExists = (s.compactKey.length() >= 14) &&
+          g_logsFs->exists("/log_" + s.compactKey.substring(0, 8) + "_" + s.compactKey.substring(8, 14) + ".csv");
+        html += "<div class='card' style='padding:8px 16px'>";
+        html += "<label style='display:flex;align-items:center;gap:12px;cursor:pointer;width:100%'>";
+        html += "<input type='checkbox' name='keys' value='" + s.compactKey + "' style='width:18px;height:18px;flex-shrink:0'>";
+        html += "<div><b>" + label + "</b>";
+        String debugMeta = routeOnly
+          ? ("Route -- duree " + s.bestLapTime + (s.lastDistanceKm.length() ? (" -- " + s.lastDistanceKm + " km") : ""))
+          : (String(s.lapCount) + " tour(s) -- meilleur : " + s.bestLapTime + (s.circuit.length() ? (" -- " + s.circuit) : ""));
+        html += "<div class='meta'>" + debugMeta;
+        if (!logFileExists) html += " -- <span style='color:#ff9d9d'>orpheline (log GPS deja supprime)</span>";
+        html += "</div></div>";
+        html += "</label>";
+        html += "</div>";
       }
-      String label = (s.compactKey.length() >= 14)
-        ? prettyTime(s.compactKey.substring(8, 14))
-        : s.compactKey;
-      bool logFileExists = (s.compactKey.length() >= 14) &&
-        g_logsFs->exists("/log_" + s.compactKey.substring(0, 8) + "_" + s.compactKey.substring(8, 14) + ".csv");
-      html += "<div class='card' style='padding:8px 16px'>";
-      html += "<label style='display:flex;align-items:center;gap:12px;cursor:pointer;width:100%'>";
-      html += "<input type='checkbox' name='keys' value='" + s.compactKey + "' style='width:18px;height:18px;flex-shrink:0'>";
-      html += "<div><b>" + label + "</b>";
-      String debugMeta = isRouteSummary(s)
-        ? ("Route -- duree " + s.bestLapTime + (s.lastDistanceKm.length() ? (" -- " + s.lastDistanceKm + " km") : ""))
-        : (String(s.lapCount) + " tour(s) -- meilleur : " + s.bestLapTime + (s.circuit.length() ? (" -- " + s.circuit) : ""));
-      html += "<div class='meta'>" + debugMeta;
-      if (!logFileExists) html += " -- <span style='color:#ff9d9d'>orpheline (log GPS deja supprime)</span>";
-      html += "</div></div>";
-      html += "</label>";
-      html += "</div>";
-    }
+    };
+
+    renderGroup(false, "Sessions piste/circuit", sessionCount);
+    renderGroup(true, "Sorties Route", routeCount);
+
     html += "<button type='submit' style='background:#b62324;margin-top:12px'>Retirer la selection</button>";
     html += "</form>";
   }
@@ -2665,6 +2727,7 @@ void WebServerManager::startDownloadMode() {
   Serial.flush(); delay(50);
 
   httpServer.on("/", HTTP_GET, handleHomePage);
+  httpServer.on("/route", HTTP_GET, handleRoutePage);
   httpServer.on("/lap", HTTP_GET, handleLapTracePage);
   httpServer.on("/download", HTTP_GET, handleDownloadRequest);
   httpServer.on("/backup", HTTP_GET, handleBackupDownload);
