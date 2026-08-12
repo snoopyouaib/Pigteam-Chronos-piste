@@ -2,14 +2,16 @@
 #include "touch_bsp.h"
 #include "i2c_bsp.h"
 
-// ===================== Tactile FT6336 (2.41) =====================
+// ===================== Tactile FT6336 / FT5x06 (2.41) =====================
 //
-// Repris du touch_bsp.c FT3168 du 1.91 -- meme famille Focaltech, meme
-// carte de registres (0x00 mode, 0x02 nombre de points, 0x03-0x06
-// coordonnees du point 1), seule l'adresse I2C et les bornes de
-// resolution changent. A confirmer au banc (adresse I2C 0x38 a
-// verifier sur le schema 2.41 -- c'est l'adresse FT3168 du 1.91,
-// probable mais pas garantie identique pour le FT6336).
+// Adresse I2C et carte de registres confirmees par la demo officielle
+// Waveshare (esp_lcd_touch_ft5x06.c/h, fournis par l'utilisateur) :
+// 0x38, registres XH/XL/YH/YL a partir de 0x03 -- exactement ce qu'on
+// avait deja. Ce qui manquait : la transformation mirror_y+swap_xy que
+// la demo officielle applique (config x_max=V_RES-1, y_max=H_RES-1,
+// flags.swap_xy=1, flags.mirror_y=1 pour le mode paysage) -- le panneau
+// tactile est monte nativement en 450x600 portrait, independamment de
+// la rotation logicielle 600x450 qu'on veut cote LVGL.
 //
 // Meme piege que sur le 1.91 (cf. README_AMOLED_bringup.md, piege #5) :
 // Touch_Init() ne fait PAS sa propre init de bus I2C, deja faite par
@@ -52,13 +54,20 @@ uint8_t getTouch(uint16_t *x,uint16_t *y)
   if(data)
   {
     I2C_read_buff(I2C_ADDR_FT6336,0x03,buf,4);
-    *y = (((uint16_t)buf[0] & 0x0f)<<8) | (uint16_t)buf[1];
-    *x = (((uint16_t)buf[2] & 0x0f)<<8) | (uint16_t)buf[3];
-    if(*x > EXAMPLE_LCD_H_RES)
-    *x = EXAMPLE_LCD_H_RES;
-    if(*y > EXAMPLE_LCD_V_RES)
-    *y = EXAMPLE_LCD_V_RES;
-    *y = EXAMPLE_LCD_V_RES - *y;
+    // Registres FT5x06/FT6336 : XH/XL puis YH/YL (ordre natif du panneau,
+    // physiquement monte en 450(large)x600(haut) portrait, independant
+    // de la rotation logicielle de l'ecran).
+    uint16_t raw_x = (((uint16_t)buf[0] & 0x0f) << 8) | (uint16_t)buf[1];
+    uint16_t raw_y = (((uint16_t)buf[2] & 0x0f) << 8) | (uint16_t)buf[3];
+    if (raw_x > (EXAMPLE_LCD_V_RES - 1)) raw_x = EXAMPLE_LCD_V_RES - 1;
+    if (raw_y > (EXAMPLE_LCD_H_RES - 1)) raw_y = EXAMPLE_LCD_H_RES - 1;
+
+    // Meme transform que la config officielle Waveshare pour le mode
+    // paysage (swap_xy=1, mirror_y=1, x_max=V_RES-1, y_max=H_RES-1,
+    // cf. esp_lcd_touch_get_coordinates() dans esp_lcd_touch.c : mirror
+    // d'abord, puis swap) : final_x = (H_RES-1) - raw_y ; final_y = raw_x.
+    *x = (EXAMPLE_LCD_H_RES - 1) - raw_y;
+    *y = raw_x;
 
     lastX = *x;
     lastY = *y;

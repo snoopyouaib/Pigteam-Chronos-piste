@@ -131,17 +131,135 @@ prochain suspect est soit la table d'init RM690B0 (le contrôleur
 accepte les commandes sans erreur mais n'affiche rien de valide),
 soit `AMOLED_EN`/le timing entre l'activation EXIO et le reset GPIO21.
 
-## À valider au banc (mis à jour, restant après les fixes du 12/08)
+## Mise à jour du 12/08 (cinq) -- crash identifié et corrigé (bug de séquencement du diagnostic)
+
+Le diagnostic par bandes (v2, message précédent) a fait planter le
+firmware (`Guru Meditation Error: StoreProhibited`, `EXCVADDR: 0x00000010`)
+avant même d'atteindre `[3/5]`. Cause : le callback `on_color_trans_done`
+(câblé sur `example_notify_lvgl_flush_ready` → `lv_disp_flush_ready()`
+dès la création de l'IO du panneau, donc *avant* que le diagnostic
+tourne) se déclenche à la fin de chaque transaction QSPI. Le
+diagnostic était placé avant `lv_disp_drv_register()`, donc
+`disp_drv.draw_buf` était encore `NULL` -- premier `draw_bitmap` réussi
+qui se termine (contrairement au v1, dont les transactions trop
+grosses échouaient avant d'atteindre ce point) déclenche le callback,
+qui déréférence ce pointeur NULL -> crash. Cohérent avec `EXCVADDR`
+proche de zéro (offset du champ `flushing` dans la struct).
+
+**Fix** : le bloc diagnostic est déplacé après `lv_disp_drv_register()`
+(où `disp_drv.draw_buf` est déjà valide) et avant `xTaskCreate()` de la
+tâche LVGL (pour éviter toute concurrence sur le bus SPI). Petit délai
+(5ms) ajouté entre bandes pour laisser respirer la queue de
+transactions.
+
+## Mise à jour du 12/08 (six) -- sources officielles Waveshare obtenues, refonte complète
+
+L'utilisateur a fourni les vraies sources de la démo LVGL officielle
+Waveshare pour le 2.41 (`09_LVGL_Test.ino` + `esp_lcd_sh8601.c/h` +
+`esp_lcd_touch_ft5x06.c/h`). Plusieurs hypothèses précédentes étaient
+fausses :
+
+1. **Pas d'IO-expander pour l'écran.** Aucune trace de TCA9554/EXIO
+   dans le code officiel pour alimenter l'AMOLED -- contrairement à
+   d'autres boards Waveshare (1.75/1.8/1.43) suivis par analogie à
+   tort. `expanderInit()` reste dans le code (inoffensif, le TCA9554
+   existe bel et bien sur le bus d'après `I2C_scan()`) mais n'est
+   probablement pas la clé du problème d'écran noir.
+2. **Panneau natif 450×600 portrait**, pas 600×450. Le mode paysage
+   600×450 voulu s'obtient via `MADCTL=0x30` (bit MV), et la table
+   d'init officielle adresse `CASET` sur **16..465** (pas 0..599 comme
+   inventé précédemment -- offset matériel de 16px) et `RASET` sur
+   0..599 pleine échelle.
+3. **Séquence de déverrouillage vendor** (`0xFE` page-select vers la
+   page 0x20 pour 2 registres, puis retour page 0x00) avant les
+   commandes DCS normales -- totalement absente de nos tentatives.
+4. **`flush_cb` officiel** : ajoute +16 sur Y (compense l'offset CASET
+   du point 2) et ne fait **aucun swap d'octets** manuel (celui hérité
+   du 1.91 était spécifique à ce montage-là, pas généralisable).
+5. **Buffers LVGL en `V_RES/10`** (pas `/4`) -- assez petits pour
+   `MALLOC_CAP_DMA` en SRAM interne, la complication PSRAM n'était pas
+   nécessaire.
+
+## Mise à jour du 12/08 (huit) -- le hardware est confirmé bon (démo officielle testée = OK)
+
+L'utilisateur a testé le `.ino` officiel Waveshare tel quel sur ce
+même hardware : **l'écran fonctionne**. Ça confirme que la table
+d'init, les pins QSPI, et le panneau physique sont tous bons -- le
+bug restant est forcément dans notre portage (PlatformIO vs Arduino
+IDE, version LVGL 8.3.11 vs 8.4.0 attendue par le wiki, ou la logique
+applicative des écrans/splash héritée telle quelle du 1.91).
+
+Réintroduction du diagnostic couleur brut (retiré précédemment), cette
+fois avec le bon offset +16 sur Y pour rester cohérent avec la vraie
+table CASET. But : déterminer si le problème est encore dans la
+chaîne bas niveau (peu probable maintenant, mais on élimine le doute)
+ou franchement dans la logique applicative (écrans 9x hérités du 1.91,
+splash à fond noir, `LV_MEM_SIZE=48Ko` peut-être insuffisant pour tous
+ces écrans -- `LV_USE_ASSERT_MALLOC=1` est actif dans `lv_conf.h` donc
+ça planterait proprement si c'était le cas, mais à garder en tête).
+
+Si le diagnostic couleur montre enfin quelque chose : le driver est
+bon, il faut chasser côté écrans applicatifs (position/couleurs/fond
+noir du splash). Si toujours rien : comparer plus finement notre
+`lv_conf.h` (hérité du 1.91) avec celui attendu pour LVGL 8.4.0, et/ou
+tenter de forcer `lvgl@8.4.0` dans `platformio.ini` au lieu de
+`8.3.11`.
+
+## Mise à jour du 12/08 (neuf) -- version ESP-IDF suspectée, alignée sur le wiki
+
+Diagnostic couleur toujours noir malgré une chaîne bas niveau
+identique byte pour byte au driver officiel (`esp_lcd_rm690b0.c/h`
+diffé de `esp_lcd_sh8601.c/h` officiel uniquement par le renommage,
+vérifié par `diff`). Le code est donc bon -- reste l'environnement de
+build.
+
+Trouvé : `platformio.ini` pointait vers la release pioarduino
+`53.03.13`, soit **Arduino-ESP32 core 3.1.3 / ESP-IDF 5.3.2** --
+héritée telle quelle du projet `chrono-AMOLED` (1.91) sans être
+revalidée pour le 2.41. Le wiki Waveshare exige explicitement le
+**core 3.0.7** pour ce board, qui correspond à la release `51.03.07`
+(**ESP-IDF 5.1.4**). Entre IDF 5.1 et 5.3, `esp_lcd`/`spi_master` ont
+eu de vraies évolutions (gestion QSPI, validation des transactions) --
+candidat sérieux pour expliquer un driver qui s'exécute sans la
+moindre erreur mais ne produit rien de visible.
+
+`platformio.ini` repointé vers `51.03.07`. LVGL également aligné sur
+`8.4.0` (celui exigé par le wiki, on avait `8.3.11` hérité du 1.91) --
+les deux changements en même temps puisqu'ils viennent de la même
+logique "coller exactement aux versions que Waveshare a validées".
+
+## Confirmation du 12/08 (sept) -- tous les exemples officiels obtenus
+
+L'utilisateur a fourni l'archive complète des exemples Waveshare
+(01 à 10 + Arduino_Playablity). Confirmations concordantes :
+
+- `i2c_bsp.cpp` de `07_EX_GPIO` : GPIO47/48, identique à ce qu'on a.
+- `gpio_bsp.cpp` (le vrai driver TCA9554 officiel, adresse 0x20
+  confirmée) : ne configure QUE EXIO5 en sortie (pour le test
+  GPIO croisé EXIO5/EXIO6 de la démo `07_EX_GPIO`) -- rien sur EXIO1.
+  Et surtout, **`09_LVGL_Test.ino` n'appelle jamais `esp32_gpio_init()`
+  ni aucune fonction TCA9554** : l'écran s'allume sans toucher à
+  l'expandeur. Confirme définitivement que `expanderInit()`/EXIO_EN
+  était une fausse piste (laissé dans le code, inoffensif, mais plus
+  suspecté pour l'écran noir).
+- Le seul GPIO d'alimentation lié à la batterie (`BAT_ON`, GPIO16
+  direct, pas EXIO) sert au test Li-ion (`08_Li-ion_Test`), sans
+  rapport avec l'écran.
+
+## À valider au banc
+
+Changement de plateforme (`51.03.07`) + LVGL `8.4.0` pas encore testé
+sur le vrai 2.41 -- prochain flash à venir. Points restants si l'écran
+reste noir malgré tout :
+
+1. **Séquence exacte des registres 0xFE/0x26/0x24/0xC2** -- reprise
+   telle quelle de la démo officielle, sens exact non documenté
+   publiquement (registres vendor non génériques), mais c'est la
+   référence connue-fonctionnelle donc le point de départ le plus
+   fiable qu'on ait eu jusqu'ici.
+2. **Boutons GPIO18/8** -- juste vérifiés "libres" sur le pinout,
+   jamais câblés ni testés (sans rapport avec l'écran).
+3. **Tactile** -- transformation mirror_y+swap_xy reprise de la démo
+   officielle mais jamais testée avec un vrai doigt sur ce firmware.
 
 
-
-
-1. **Table d'init RM690B0** -- la plus grosse inconnue restante. Le
-   driver tourne, l'écran est maintenant alimenté (EXIO_EN), mais peut
-   rester noir/afficher n'importe quoi selon ce que le contrôleur
-   attend vraiment à l'init.
-2. **Orientation (MADCTL 0x36)** -- 0x00 est un point de départ neutre,
-   probablement à ajuster (mirror/swap) une fois l'image visible.
-3. **Adresse I2C FT6336** -- 0x38 hérité du 1.91, à confirmer.
-4. **Boutons GPIO18/8** -- juste vérifiés "libres" sur le pinout,
-   jamais câblés ni testés.
