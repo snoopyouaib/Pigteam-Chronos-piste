@@ -56,7 +56,15 @@ static SemaphoreHandle_t lvgl_mux = NULL;
 #define EXAMPLE_PIN_NUM_LCD_DATA1         (GPIO_NUM_12)
 #define EXAMPLE_PIN_NUM_LCD_DATA2         (GPIO_NUM_13)
 #define EXAMPLE_PIN_NUM_LCD_DATA3         (GPIO_NUM_14)
-#define EXAMPLE_PIN_NUM_LCD_RST           (GPIO_NUM_21)
+// V2 (12/08) : GPIO21 n'est PLUS le reset de l'ecran sur cette revision
+// materielle (etiquette "V2") -- le reset passe par le TCA9554
+// (cf. lib/expander/expander_bsp.h, expanderResetOled()), appele
+// explicitement dans main.cpp AVANT displayInit(). -1 = pas de GPIO
+// de reset direct, le driver esp_lcd_new_panel_rm690b0 ne pilotera
+// donc aucune broche ici (son propre reset logiciel via commande
+// serait de toute facon court-circuite par le vrai reset materiel
+// deja effectue en amont).
+#define EXAMPLE_PIN_NUM_LCD_RST           (-1)
 #define EXAMPLE_PIN_NUM_BK_LIGHT          (-1)
 
 // Mode paysage (AMOLED_Rotate == Rotate_90 dans la demo officielle) --
@@ -88,8 +96,8 @@ static const rm690b0_lcd_init_cmd_t lcd_init_cmds[] = {
   {0x35, (uint8_t []){0x00}, 0, 0},
   {0x51, (uint8_t []){0x00}, 1, 10},
   {0x11, (uint8_t []){0x00}, 0, 80},
-  {0x2A, (uint8_t []){0x00,0x10,0x01,0xD1}, 4, 0},
-  {0x2B, (uint8_t []){0x00,0x00,0x02,0x57}, 4, 0},
+  {0x2A, (uint8_t []){0x00,0x10,0x00,0xD1}, 4, 0}, // valeurs V2 exactes (differentes du V1)
+  {0x2B, (uint8_t []){0x00,0x00,0x00,0x57}, 4, 0}, // idem
   {0x29, (uint8_t []){0x00}, 0, 10},
   {0x36, (uint8_t []){0x30}, 1, 0}, // MADCTL -- mode paysage (bit MV)
   {0x51, (uint8_t []){0xFF}, 1, 0}, // luminosite max
@@ -112,8 +120,19 @@ static void example_lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_
   const int offsety1 = area->y1 + 16;
   const int offsety2 = area->y2 + 16;
 
-  // PAS de swap d'octets ici (contrairement au flush_cb herite du 1.91) --
-  // absent de la demo officielle Waveshare pour ce board.
+  // Swap manuel des octets de chaque pixel -- meme constat que sur le
+  // 1.91 (cf. chrono-AMOLED/lib/display/display_bsp.cpp) : ni
+  // LV_COLOR_16_SWAP (LVGL) ni le bit BGR du MADCTL n'ont d'effet
+  // observable sur ce type de montage QSPI AMOLED, le swap semble se
+  // produire plus bas, cote transport ESP-IDF (esp_lcd_panel_io_spi),
+  // independamment de ces deux reglages. On le force ici, au seul
+  // endroit qu'on controle totalement avant l'envoi reel a l'ecran.
+  uint16_t* buf16 = (uint16_t*)color_map;
+  uint32_t pixelCount = lv_area_get_width(area) * lv_area_get_height(area);
+  for (uint32_t i = 0; i < pixelCount; i++) {
+    buf16[i] = (uint16_t)((buf16[i] >> 8) | (buf16[i] << 8));
+  }
+
   esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, color_map);
 }
 
@@ -269,47 +288,6 @@ void displayInit()
   disp_drv.draw_buf = &disp_buf;
   disp_drv.user_data = panel_handle;
   lv_disp_t *disp = lv_disp_drv_register(&disp_drv);
-
-  // ===== DIAGNOSTIC TEMPORAIRE (12/08, bis) =====
-  // La demo officielle Waveshare marche sur ce meme hardware (confirme
-  // par l'utilisateur) -- la chaine bas niveau (pins QSPI, table
-  // d'init, offset +16) est donc maintenant la bonne reference. Reste
-  // a savoir si le probleme est encore plus bas (un detail du portage
-  // PlatformIO/version LVGL) ou dans la logique applicative (ecrans
-  // herites du 1.91, splash a fond noir). Ce remplissage plein ecran,
-  // en appelant esp_lcd_panel_draw_bitmap directement (donc AVANT tout
-  // objet LVGL applicatif), applique le meme offset +16 que le vrai
-  // flush_cb pour rester coherent avec la vraie table CASET/RASET.
-  // A RETIRER une fois l'ecran confirme fonctionnel.
-  {
-    const int band_h = EXAMPLE_LVGL_BUF_HEIGHT;
-    size_t band_bytes = (size_t)EXAMPLE_LCD_H_RES * band_h * (LCD_BIT_PER_PIXEL / 8);
-    uint16_t *fill_buf = (uint16_t*)heap_caps_malloc(band_bytes, MALLOC_CAP_DMA);
-    if (fill_buf) {
-      uint16_t colors[3] = {0xF800, 0x07E0, 0x001F}; // rouge, vert, bleu (RGB565)
-      const char *names[3] = {"ROUGE", "VERT", "BLEU"};
-      for (int c = 0; c < 3; c++) {
-        for (size_t i = 0; i < band_bytes / 2; i++) fill_buf[i] = colors[c];
-        ESP_LOGI(TAG, "[diag] remplissage plein ecran par bandes : %s", names[c]);
-        for (int y = 0; y < EXAMPLE_LCD_V_RES; y += band_h) {
-          int y2 = y + band_h;
-          if (y2 > EXAMPLE_LCD_V_RES) y2 = EXAMPLE_LCD_V_RES;
-          // +16 -- meme offset que example_lvgl_flush_cb, pour rester
-          // coherent avec la vraie table CASET (16..465).
-          esp_err_t err = esp_lcd_panel_draw_bitmap(panel_handle, 0, y + 16, EXAMPLE_LCD_H_RES, y2 + 16, fill_buf);
-          if (err != ESP_OK) {
-            ESP_LOGE(TAG, "[diag] echec draw_bitmap bande y=%d : %s", y, esp_err_to_name(err));
-          }
-          vTaskDelay(pdMS_TO_TICKS(5));
-        }
-        vTaskDelay(pdMS_TO_TICKS(1500));
-      }
-      heap_caps_free(fill_buf);
-    } else {
-      ESP_LOGE(TAG, "[diag] echec alloc buffer de remplissage");
-    }
-  }
-  // ===== FIN DIAGNOSTIC TEMPORAIRE =====
 
   ESP_LOGI(TAG, "Install LVGL tick timer");
   const esp_timer_create_args_t lvgl_tick_timer_args = {

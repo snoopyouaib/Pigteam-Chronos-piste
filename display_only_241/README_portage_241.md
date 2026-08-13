@@ -248,6 +248,76 @@ L'utilisateur a fourni l'archive complète des exemples Waveshare
 
 ## À valider au banc
 
+RÉSOLU (12/08, dix) -- voir section suivante.
+
+## RÉSOLU (12/08, dix) -- carte V2, pas V1 ! Cause trouvée et corrigée
+
+Après une journée entière de diagnostic (PlatformIO, Arduino IDE,
+environnement propre, deux cartes différentes testées, support
+Waveshare contacté), la cause réelle : **notre board est une révision
+"V2"** (étiquette "V2" à côté du marquage "2.41" sur les deux unités),
+une révision matérielle absente du wiki public et du repo GitHub
+"principal" qu'on a utilisé toute la journée -- confirmée via le repo
+dédié que l'utilisateur a trouvé :
+https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-2.41-V2
+
+**Différence matérielle clé** : sur le V1, `AMOLED_RST` est un vrai
+GPIO direct (GPIO21). Sur le V2, GPIO21 n'est **plus** câblé au reset
+de l'écran -- le reset de l'écran (et du tactile) passe désormais par
+le TCA9554 (EXIO0 = reset écran, EXIO1 = reset tactile), avec un vrai
+pulse (haut → bas 20ms → haut, puis 120ms d'attente) à effectuer avant
+l'init du panneau. C'est exactement pour ça que tout ce qui a été
+testé aujourd'hui (notre code V1, la démo V1 officielle recompilée,
+le `.bin` du wiki V1, le `10_FactoryProgram` V1, même flashé sur un
+environnement Arduino IDE totalement propre) laissait l'écran noir :
+le reset matériel de l'écran ne partait jamais, quel que soit le
+firmware -- tous supposaient GPIO21, qui ne va nulle part sur cette
+carte.
+
+**Confirmé fonctionnel** : le firmware précompilé du repo V2
+(`03_Firmware/ESP32-S3-Touch-AMOLED-2.41-v2.bin`) flashé via le Flash
+Download Tool -- écran opérationnel.
+
+**Corrections apportées à `display_only_241`** :
+- `lib/expander/expander_bsp.h/.cpp` réécrit : `expanderInit()`
+  configure maintenant EXIO0/EXIO1/EXIO5 en sortie (plus EXIO1 seul
+  comme avant, fausse piste "AMOLED_EN"), `expanderResetOled()` et
+  `expanderResetTouch()` implémentent le vrai pulse de reset par
+  broche, repris à l'identique du repo V2 officiel.
+- `lib/display/display_bsp.cpp` : `EXAMPLE_PIN_NUM_LCD_RST` passé à
+  `-1` (plus de GPIO direct), table CASET (`0x2A`)/RASET (`0x2B`)
+  alignée sur les valeurs exactes du V2 (légèrement différentes du
+  V1 : `0x00,0x10,0x00,0xD1` / `0x00,0x00,0x00,0x57`).
+- `src/main.cpp` : séquence réordonnée pour matcher le V2 --
+  `expanderInit()` → `expanderResetOled()` → `displayInit()` →
+  `expanderResetTouch()` → `Touch_Init()`.
+
+**Reste à valider au banc** : ces changements n'ont pas encore été
+retestés avec ce firmware PlatformIO corrigé (seul le `.bin`
+précompilé V2 a été confirmé). Prochain flash à faire pour vérifier
+que le portage `display_only_241` fonctionne enfin.
+
+## RÉSOLU (12/08, dix bis) -- ça marche sur PlatformIO !
+
+Confirmé par l'utilisateur : `display_only_241` corrigé (reset via
+TCA9554) boote jusqu'à `Pret.` et affiche bien l'application PigTeam
+(l'écran Statut/chrono de test réel). Objectif du portage atteint.
+
+Deux ajustements cosmétiques mineurs identifiés au premier essai :
+
+1. **Bloc diagnostic couleur retiré** -- n'était plus nécessaire une
+   fois la cause racine trouvée, retiré de `display_bsp.cpp`.
+2. **Couleurs inversées (rouge/bleu)** -- `rgb_ele_order` passé de
+   `LCD_RGB_ELEMENT_ORDER_RGB` à `LCD_RGB_ELEMENT_ORDER_BGR` dans
+   `display_bsp.cpp`. Réglage global du panneau, corrige aussi les
+   couleurs du splash au passage.
+3. **Splash 536×240 mal dimensionné** sur le nouveau canevas 600×450
+   -- attendu, image héritée du 1.91 telle quelle (déjà documenté
+   plus haut dans ce fichier). Pas un bug, juste un asset à
+   redimensionner/recentrer plus tard, sans urgence pour le bring-up.
+
+
+
 Changement de plateforme (`51.03.07`) + LVGL `8.4.0` pas encore testé
 sur le vrai 2.41 -- prochain flash à venir. Points restants si l'écran
 reste noir malgré tout :
