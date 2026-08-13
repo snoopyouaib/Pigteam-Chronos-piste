@@ -1235,11 +1235,13 @@ void setup() {
   I2C_master_Init();
   Serial.println("[1/5] I2C partage ok");
   I2C_scan(); // diagnostic -- confirme quelles adresses repondent reellement sur GPIO47/48 avant d'aller plus loin
-  expanderInit(); // TCA9554 -- active AMOLED_EN (EXIO1), sinon ecran noir meme avec un displayInit() qui ne plante pas
-  Touch_Init();
-  Serial.println("[2/5] Tactile ok (envoye -- voir I2C_scan ci-dessus pour confirmer une reponse reelle)");
+  expanderInit(); // TCA9554 -- configure EXIO0 (reset ecran) et EXIO1 (reset tactile) en sortie
+  expanderResetOled(); // reset materiel reel de l'ecran (V2) -- SANS CA, ECRAN NOIR GARANTI meme avec une init QSPI par ailleurs parfaite (GPIO21 ne va nulle part sur le V2)
   displayInit();
-  Serial.println("[3/5] Ecran + LVGL ok");
+  Serial.println("[2/5] Ecran + LVGL ok");
+  expanderResetTouch(); // reset materiel du tactile (V2), avant de lui parler
+  Touch_Init();
+  Serial.println("[3/5] Tactile ok (envoye -- voir I2C_scan ci-dessus pour confirmer une reponse reelle)");
 
   Serial.println("[3.5/5] GPS/SD/batterie/WiFi simules -- aucune init hardware necessaire ici.");
 

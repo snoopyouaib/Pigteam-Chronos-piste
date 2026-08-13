@@ -1,6 +1,6 @@
 #include "expander_bsp.h"
 #include "i2c_bsp.h"
-#include <stdio.h>
+#include <Arduino.h> // delay()
 
 // Registres TCA9554 standard :
 //   0x00 Input Port, 0x01 Output Port, 0x02 Polarity Inversion,
@@ -9,27 +9,50 @@
 #define REG_OUTPUT         0x01
 #define REG_CONFIG         0x03
 
-#define EXIO_TE    (1 << 0)  // AMOLED_TE -- entree
-#define EXIO_EN    (1 << 1)  // AMOLED_EN -- sortie, celle qu'on pilote
-#define EXIO_TPINT (1 << 2)  // TP_INT -- entree
-#define EXIO_INT2  (1 << 3)  // IMU_INT2 -- entree
-#define EXIO_INT1  (1 << 4)  // IMU_INT1 / RTC_INT -- entree
+// Bits confirmes par le repo officiel V2 (09_LVGL_Test.ino,
+// example_exio_init/example_exio_reset) :
+#define TCA_GPIO_0   0  // EXIO_OLED_RESET
+#define TCA_GPIO_1   1  // EXIO_TP_RESET
+#define TCA_GPIO_5   5  // configure en sortie par la demo V2, role exact non documente
+
+static uint8_t exioState = 0x00; // reflete l'etat courant du registre de sortie
+
+static void exioWriteOutput()
+{
+  I2C_write_buff(I2C_ADDR_TCA9554, REG_OUTPUT, &exioState, 1);
+}
+
+static void exioSetState(uint8_t pin, uint8_t value)
+{
+  if (value) exioState |= (uint8_t)(1u << pin);
+  else       exioState &= (uint8_t)~(1u << pin);
+  exioWriteOutput();
+}
 
 void expanderInit()
 {
-  // Configuration : tout en entree (bit=1) sauf EXIO_EN en sortie (bit=0).
-  uint8_t config = (uint8_t)(~EXIO_EN);
-  uint8_t ret1 = I2C_write_buff(I2C_ADDR_TCA9554, REG_CONFIG, &config, 1);
+  uint8_t outputMask = (uint8_t)((1u << TCA_GPIO_0) | (1u << TCA_GPIO_1) | (1u << TCA_GPIO_5));
+  exioWriteOutput(); // etat initial (tout a 0) avant de configurer la direction
+  uint8_t config = (uint8_t)(~outputMask); // 1=entree pour tout sauf les 3 bits ci-dessus (0=sortie)
+  I2C_write_buff(I2C_ADDR_TCA9554, REG_CONFIG, &config, 1);
+}
 
-  // Sortie : EXIO_EN a 1 (AMOLED_EN actif), reste a 0 (sans effet sur
-  // les broches configurees en entree).
-  uint8_t output = EXIO_EN;
-  uint8_t ret2 = I2C_write_buff(I2C_ADDR_TCA9554, REG_OUTPUT, &output, 1);
+static void exioResetPulse(uint8_t pin)
+{
+  exioSetState(pin, 1);
+  delay(20);
+  exioSetState(pin, 0);
+  delay(20);
+  exioSetState(pin, 1);
+  delay(120);
+}
 
-  // I2C_write_buff renvoie l'esp_err_t de i2c_master_write_to_device
-  // tronque en uint8_t -- 0 (ESP_OK) = le TCA9554 a bien ACKe. Non nul
-  // (typiquement ESP_ERR_TIMEOUT=263->0x07 tronque, ou ESP_FAIL=-1->0xFF)
-  // = rien n'a repondu a l'adresse 0x20 sur ce bus.
-  printf("[expander] TCA9554 0x20 config=0x%02X ret=%d, output=0x%02X ret=%d\n",
-         config, ret1, output, ret2);
+void expanderResetOled()
+{
+  exioResetPulse(TCA_GPIO_0);
+}
+
+void expanderResetTouch()
+{
+  exioResetPulse(TCA_GPIO_1);
 }
