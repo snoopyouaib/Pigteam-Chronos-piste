@@ -120,8 +120,19 @@ static void example_lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_
   const int offsety1 = area->y1 + 16;
   const int offsety2 = area->y2 + 16;
 
-  // PAS de swap d'octets ici (contrairement au flush_cb herite du 1.91) --
-  // absent de la demo officielle Waveshare pour ce board.
+  // Swap manuel des octets de chaque pixel -- meme constat que sur le
+  // 1.91 (cf. chrono-AMOLED/lib/display/display_bsp.cpp) : ni
+  // LV_COLOR_16_SWAP (LVGL) ni le bit BGR du MADCTL n'ont d'effet
+  // observable sur ce type de montage QSPI AMOLED, le swap semble se
+  // produire plus bas, cote transport ESP-IDF (esp_lcd_panel_io_spi),
+  // independamment de ces deux reglages. On le force ici, au seul
+  // endroit qu'on controle totalement avant l'envoi reel a l'ecran.
+  uint16_t* buf16 = (uint16_t*)color_map;
+  uint32_t pixelCount = lv_area_get_width(area) * lv_area_get_height(area);
+  for (uint32_t i = 0; i < pixelCount; i++) {
+    buf16[i] = (uint16_t)((buf16[i] >> 8) | (buf16[i] << 8));
+  }
+
   esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, color_map);
 }
 
