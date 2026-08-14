@@ -3,12 +3,15 @@
 #include <LittleFS.h>
 #include <vector>
 
-// Pins SDMMC confirmes au bring-up du 1.91 (mode 1-fil -- flag
-// "VersionControl_V2" actif par defaut dans le driver Waveshare d'origine,
-// cf. README_AMOLED_bringup.md).
-#define SD_MMC_D0   8
-#define SD_MMC_CMD  42
-#define SD_MMC_CLK  9
+// Pins SDMMC 2.41 : connecteur SD dedie sur ce board (CS/CLK/MOSI/MISO
+// au pinout Waveshare), distinct du montage 1.91 (GPIO8/42/9, qui sur
+// le 2.41 sont pris par BACK_BUTTON et l'ecran QSPI). Mode 1-fil
+// (CLK/CMD/D0 uniquement) repris a l'identique du 1.91 -- la broche
+// CS du pinout (GPIO2) n'est pas utilisee en SDMMC 1-bit, seulement en
+// SPI. A confirmer au banc (jamais teste sur ce montage).
+#define SD_MMC_D0   6   // MISO/D0
+#define SD_MMC_CMD  5   // MOSI/CMD
+#define SD_MMC_CLK  4   // SCLK/MCLK
 
 fs::FS* gpsLogFs = &LittleFS;
 bool gpsLogsOnSd = false;

@@ -43,6 +43,7 @@
 
 #include "i2c_bsp.h"
 #include "touch_bsp.h"
+#include "expander_bsp.h"
 #include "display_bsp.h"
 #include "fonts_teko.h"
 #include "splash_pigteam.h"
@@ -59,8 +60,11 @@
 // desormais entierement sur le tactile (swipe pour l'anneau, tap direct
 // pour les listes -- deja fonctionnel en parallele avant ce changement,
 // cf. ringScreenGestureCb() et les commentaires "Tap: choisir").
-#define PUSH_BUTTON   16  // etait GPIO10 -- deplace le 29/07 (GPIO16 libre, pas de strapping/PSRAM sur ESP32-S3)
-#define BACK_BUTTON   2  // etait GPIO14 -- deplace le 29/07. Passe brievement par GPIO3 (erreur de soudure sur le 1er chrono) puis standardise sur GPIO2 pour tous les exemplaires (le 2eme chrono en cours de montage, resoude aussi le 1er) -- GPIO2 est libre et sans fonction de strapping sur l'ESP32-S3, contrairement a GPIO3 (source JTAG au demarrage, sans consequence pratique mais autant l'eviter quand on a le choix)
+// 2.41 : GPIO16/GPIO2 du 1.91 sont pris ailleurs sur ce board (16 =
+// BAT_Control, 2 = SD_CS) -- repris sur GPIO18/GPIO8, valides au banc
+// display_only_241 (libres, sans fonction de strapping).
+#define PUSH_BUTTON   18
+#define BACK_BUTTON   8
 
 volatile bool backButtonPressed = false;
 static unsigned long lastBackIsrMs = 0;
@@ -2300,14 +2304,22 @@ static void handleBack() {
 void setup() {
   Serial.begin(115200);
   delay(1000);
-  Serial.println("=== firmware_191 -- GPS/CourseManager/SD reels (Circuit/Nouveau circuit/Connexion/Session/Reglages) ===");
+  Serial.println("=== firmware_241 (portage en cours, ecrans 536x240 non adaptes) -- GPS/CourseManager/SD reels (Circuit/Nouveau circuit/Connexion/Session/Reglages) ===");
 
   I2C_master_Init();
   Serial.println("[1/5] I2C partage ok");
-  Touch_Init();
-  Serial.println("[2/5] Tactile ok");
+  // 2.41 V2 : reset ecran/tactile via TCA9554 (EXIO0/EXIO1) --
+  // obligatoire avant displayInit(), sans quoi le panneau RM690B0 ne
+  // recoit jamais son pulse de reset materiel (ecran blanc/indetermine,
+  // pas d'erreur de compilation ni de plantage -- cf. bring-up
+  // display_only_241 du 12/08).
+  expanderInit();
+  expanderResetOled();
   displayInit();
-  Serial.println("[3/5] Ecran + LVGL ok");
+  Serial.println("[2/5] Ecran + LVGL ok");
+  expanderResetTouch();
+  Touch_Init();
+  Serial.println("[3/5] Tactile ok");
 
   initGps();
   Serial.println("[3.5/5] GPS ok (reel -- plus simule)");
