@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <Arduino.h>
 #include "adc_bsp.h"
 #include "esp_log.h"
 #include "esp_adc/adc_oneshot.h"
@@ -25,8 +26,28 @@
   static adc_cali_handle_t cali_handle;
 #endif
   static adc_oneshot_unit_handle_t adc2_handle;
+// GPIO16 = BAT_Control : commande le circuit d'alimentation batterie
+// (documente par Waveshare -- BAT_GPIO_Init/BAT_ON/BAT_OFF). Sans
+// l'activer explicitement (BAT_ON), le rail batterie/diviseur lu par
+// l'ADC reste deconnecte meme avec une vraie batterie branchee -- sur
+// USB seul, ADC lit une entree flottante proche de 0V -> "NO BAT"
+// meme avec batterie physiquement presente. A appeler une fois dans
+// adc_bsp_init(), avant toute lecture.
+void BAT_GPIO_Init(void) {
+  pinMode(16, OUTPUT);
+}
+void BAT_ON(void) {
+  digitalWrite(16, HIGH);
+}
+void BAT_OFF(void) {
+  digitalWrite(16, LOW);
+}
+
 void adc_bsp_init(void)
 {
+  // BAT_GPIO_Init()/BAT_ON() sont deja appeles tout au debut de
+  // setup() (main.cpp) pour le maintien d'alimentation -- pas la
+  // peine de les rappeler ici, digitalWrite(16, HIGH) est deja actif.
 #ifdef ADC_Calibrate
   adc_cali_curve_fitting_config_t cali_config =
   {
@@ -58,12 +79,15 @@ void adc_get_value(float *value,int *data)
   {
 #ifdef ADC_Calibrate
     adc_cali_raw_to_voltage(cali_handle,adcdata,&vol);
-    // Facteur pont diviseur repris du 1.91 (x2) -- NON VERIFIE sur le
-    // 2.41, le schema n'a pas ete consulte. A calibrer au banc : tape
-    // 'b' sur le port serie (affiche tension/pourcentage) et compare a
-    // une mesure au multimetre sur le connecteur batterie MX1.25, puis
-    // ajuste ce facteur si l'ecart depasse quelques %.
-    *value = 0.001 * vol * 2;
+    // Facteur du pont diviseur : x2.94. Deux points de calibration au
+    // multimetre donnent des facteurs legerement differents (2.90 pour
+    // 3.85-3.94V, 2.98 pour 4.15V) -- non-linearite reelle de l'ADC,
+    // pas juste du bruit de mesure. x2.94 = moyenne des deux, choisie
+    // pour bien coller pres de la pleine charge (partie la plus raide
+    // de la courbe batteryVoltageToPercent() : 15 points de % pour
+    // seulement 0.15V d'ecart entre 4.0 et 4.15V, donc un petit ecart
+    // de tension y devient un gros ecart de % affiche).
+    *value = 0.001 * vol * 2.94;
 #else
     *value = ((float)adcdata * 3.3/4096) * 2;
 #endif

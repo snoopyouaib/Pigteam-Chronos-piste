@@ -7,18 +7,26 @@
 // Portage du GpsManager.cpp du projet chrono GPS TFT -- meme interface
 // GpsManager.h, meme logique de parsing NMEA (RMC/GGA/GSA). Seul le
 // brochage 2.41 : GPIO12/13 utilises par le 1.91 sont desormais
-// QSPI_D1/D2 de l'ecran (conflit materiel direct) -- retour sur
-// GPIO43/44 (UART0 natif, libres sur le 2.41). Sans risque : le
-// deplacement 43/44->12/13 sur le 1.91 (04/08) n'etait pas du a une
-// broche ESP32 mais a un sertissage TX/RXD defaillant sur le
-// connecteur JST-PH du module (meme symptome 1Hz confirme sur les
-// deux paires de GPIO a l'epoque, cf. README section "Diagnostic GPS
-// bloque a 1Hz"). A verifier au banc : le point de soudure sur le
-// connecteur de ce module-ci, comme toujours.
+// QSPI_D1/D2 de l'ecran (conflit materiel direct). GPIO43/44 (UART0
+// natif, prevu initialement -- cf. etiquette au dos de la carte)
+// TESTES ET ECARTES le 14/08 : confirmes comme les vraies broches
+// physiques (test digitalRead + pull-down concluant), mais l'UART1
+// n'y recoit jamais rien, meme dans un sketch isole sans rien
+// d'autre -- tres probablement leur liaison materielle par defaut a
+// l'UART0 (broches de la console ROM/bootloader) qui empeche leur
+// reattribution complete a l'UART1 sur ce core. Root cause exacte non
+// identifiee, migre empiriquement sur GPIO1/GPIO2 (confirme
+// fonctionnel le 14/08 : fix 3D 10Hz, 23-24 satellites). Ni GPIO1 ni
+// GPIO2 n'ont de fonction de strapping sur l'ESP32-S3.
+// ATTENTION MATERIEL : GPIO1/2 ne sont PAS sortis sur le petit
+// connecteur JST 4 broches (GND/3V3/43/44) du 2.41 -- il faut cabler
+// le module GPS en filaire direct sur le header 34 broches, le
+// connecteur JST integre reste inutilisable pour le GPS sur ce
+// montage tant qu'aucune revision materielle ne sort GPIO1/2 dessus.
 // montage Tiny N8R8.
 
-#define GPS_RX_PIN 43  // <- TX du module GPS (UART0 natif 2.41)
-#define GPS_TX_PIN 44  // -> RX du module GPS (UART0 natif 2.41)
+#define GPS_RX_PIN 1   // <- TX du module GPS (etait 43, cf. commentaire ci-dessus)
+#define GPS_TX_PIN 2   // -> RX du module GPS (etait 44)
 
 HardwareSerial GPSSerial(1); // UART1 de l'ESP32 (l'UART0 reste pour le Serial USB de debug)
 

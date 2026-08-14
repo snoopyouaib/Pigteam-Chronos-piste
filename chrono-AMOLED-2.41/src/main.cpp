@@ -99,6 +99,15 @@ static const unsigned long PUSH_DEBOUNCE_MS = 200;
 // -- largement en dessous du temps de reaction humain pour un vrai
 // appui volontaire.
 static const unsigned long BACK_HOLD_STOP_MS = 700;
+// PWR (GPIO15) -- extinction propre par appui long, ajoute le 14/08
+// maintenant qu'une vraie batterie est disponible pour tester. Plus
+// long que BACK_HOLD_STOP_MS pour eviter une extinction accidentelle
+// en manipulant le chrono. Sans effet sur USB (l'alimentation USB
+// maintient la carte independamment de GPIO16) -- utile seulement sur
+// batterie, ce qui est le comportement voulu.
+#define PWR_BUTTON 15
+static const unsigned long PWR_HOLD_OFF_MS = 2000;
+static unsigned long pwrHoldSinceMs = 0; // 0 = pas d'appui PWR en cours
 static unsigned long backHoldStopPendingSinceMs = 0; // 0 = pas d'appui BACK en attente de confirmation
 
 // Recalcul periodique du debit RMC reel (07/08, suite au constat que
@@ -1470,9 +1479,9 @@ static lv_obj_t* lblRec;
 static lv_obj_t* lblBatt;
 static lv_obj_t* lblBig;
 static lv_obj_t* lblClock;
+static lv_obj_t* lblRouteChrono; // mode Route uniquement -- meme taille/style que lblClock, en face (BOTTOM_RIGHT)
 static lv_obj_t* lblRecHint; // "PRESS REC", cf. commentaire pres de sa creation
 static lv_obj_t* lblDernier;
-static lv_obj_t* lblRouteChrono; // mode Route uniquement -- meme taille/style que lblClock, en face (BOTTOM_RIGHT)
 static lv_obj_t* lblBest;
 static lv_obj_t* lblTours;
 
@@ -1497,7 +1506,7 @@ static void buildStatusScreen() {
   lv_obj_align(lblBatt, LV_ALIGN_TOP_RIGHT, -4, 0);
 
   lblBig = lv_label_create(scrStatus);
-  lv_obj_set_style_text_font(lblBig, &lv_font_teko_bold_84, 0);
+  lv_obj_set_style_text_font(lblBig, &lv_font_teko_bold_110, 0); // chrono principal agrandi (12/08, etait bold_84)
   lv_obj_set_style_text_color(lblBig, lv_color_white(), 0);
 
   lblClock = lv_label_create(scrStatus);
@@ -1522,20 +1531,29 @@ static void buildStatusScreen() {
   lv_label_set_text(lblRecHint, "PRESS REC");
 
   lblDernier = lv_label_create(scrStatus);
-  lv_obj_set_style_text_font(lblDernier, &lv_font_teko_bold_38, 0); // etait medium_34, un poil trop petit
+  // bold_56, empile juste au-dessus de lblBest en bas d'ecran
+  // (cf. commentaires Y ci-dessous et sur lblBig/lblBest).
+  lv_obj_set_style_text_font(lblDernier, &lv_font_teko_bold_56, 0);
   lv_obj_set_style_text_color(lblDernier, lv_color_white(), 0);
-  lv_obj_align(lblDernier, LV_ALIGN_TOP_LEFT, 4, 162);
+  lv_obj_align(lblDernier, LV_ALIGN_TOP_LEFT, 4, 310);
 
   lblBest = lv_label_create(scrStatus);
-  lv_obj_set_style_text_font(lblBest, &lv_font_teko_bold_38, 0); // etait medium_34, un poil trop petit
+  lv_obj_set_style_text_font(lblBest, &lv_font_teko_bold_56, 0); // idem lblDernier
   lv_obj_set_style_text_color(lblBest, lv_color_white(), 0);
-  lv_obj_align(lblBest, LV_ALIGN_TOP_LEFT, 4, 202);
+  lv_obj_align(lblBest, LV_ALIGN_TOP_LEFT, 4, 382);
 
   lblTours = lv_label_create(scrStatus);
   lv_obj_set_style_text_font(lblTours, &lv_font_teko_bold_38, 0); // etait medium_34, aligne sur Dernier/Best
   lv_obj_set_style_text_color(lblTours, lv_color_white(), 0);
   lv_obj_align(lblTours, LV_ALIGN_BOTTOM_RIGHT, -4, -4);
 }
+
+// ===================== Arret definitif (aligne sur chrono-AMOLED, 05/08) =====================
+// BACK maintenu 700ms pendant l'enregistrement (SCR_STATUS) = arret
+// definitif direct, sans ecran de confirmation -- cf. bloc dedie dans
+// loop() (BACK_HOLD_STOP_MS) et commentaire pres de cette constante.
+// L'ancien systeme (SCR_CONFIRM_STOP, PUSH=reprendre/BACK=arreter)
+// etait source de confusion reelle sur le terrain, retire le 05/08.
 
 static void updateStatusScreen(unsigned long nowMs) {
   char buf[64];
@@ -1565,6 +1583,7 @@ static void updateStatusScreen(unsigned long nowMs) {
 
   if (!recordingEnabled) {
     lv_obj_add_flag(lblRouteChrono, LV_OBJ_FLAG_HIDDEN); // au cas ou on vient de quitter le mode Route
+    lv_obj_clear_flag(lblBig, LV_OBJ_FLAG_HIDDEN); // au cas ou on stoppe pile en phase "eteinte" du clignotement (cf. branche REC actif)
     snprintf(buf, sizeof(buf), "%d km/h", (int)gpsSpeedKmh);
     lv_label_set_text(lblBig, buf);
     lv_obj_align(lblBig, LV_ALIGN_TOP_MID, 0, 40);
@@ -1597,10 +1616,11 @@ static void updateStatusScreen(unsigned long nowMs) {
     // habituelle (comme avant REC), chrono du parcours ajoute en face
     // (BOTTOM_RIGHT, meme taille) -- duree ecoulee depuis le depart, ne
     // repart jamais a zero. Dernier/Best/Tours toujours masques (aucun
-    // sens sans notion de tour).
+    // sens sans notion de tour). Aligne sur chrono-AMOLED.
+    lv_obj_clear_flag(lblBig, LV_OBJ_FLAG_HIDDEN); // au cas ou on bascule en mode Route pile en phase "eteinte" du clignotement (cf. branche REC actif)
     snprintf(buf, sizeof(buf), "%d km/h", (int)gpsSpeedKmh);
     lv_label_set_text(lblBig, buf);
-    lv_obj_align(lblBig, LV_ALIGN_TOP_MID, 0, 40);
+    lv_obj_align(lblBig, LV_ALIGN_TOP_MID, 0, 130); // meme position que le chrono en REC actif (cf. plus bas)
 
     char timeBuf[10];
     getLocalDateTime(nullptr, 0, timeBuf, sizeof(timeBuf));
@@ -1623,16 +1643,30 @@ static void updateStatusScreen(unsigned long nowMs) {
     if (millis() < lapFreezeUntilMs) {
       // Tour vient de se terminer -- affiche encore son temps fige,
       // plutot que de reafficher direct le chrono du tour suivant.
+      // Clignote (500ms allume/250ms eteint) pour bien signaler que
+      // c'est un temps fige, pas le chrono qui continue de tourner --
+      // sinon rien ne distingue visuellement ce temps de tour termine
+      // d'un chrono actif normal.
       formatLapTime(getLastFinishedLapMs(), buf, sizeof(buf));
+      unsigned long phase = millis() % 750; // cycle 500ms ON + 250ms OFF = 750ms
+      bool blinkOn = phase < 500;
+      if (blinkOn) lv_obj_clear_flag(lblBig, LV_OBJ_FLAG_HIDDEN);
+      else lv_obj_add_flag(lblBig, LV_OBJ_FLAG_HIDDEN);
     } else if (currentLapMs > 0) {
       // Ligne franchie (getRaceStarted() true cote CourseManager/DovesLapTimer) -- chrono actif.
+      lv_obj_clear_flag(lblBig, LV_OBJ_FLAG_HIDDEN); // au cas ou on sort tout juste du clignotement ci-dessus
       formatLapTime(currentLapMs, buf, sizeof(buf));
     } else {
       // REC actif mais course pas encore demarree -- vitesse plus utile qu'un chrono fige.
+      lv_obj_clear_flag(lblBig, LV_OBJ_FLAG_HIDDEN); // idem
       snprintf(buf, sizeof(buf), "%d km/h", (int)gpsSpeedKmh);
     }
     lv_label_set_text(lblBig, buf);
-    lv_obj_align(lblBig, LV_ALIGN_TOP_MID, 0, 50);
+    // y=130 (remonte depuis 165, sur demande -- meme position que le
+    // mode Route desormais, cf. plus haut). lblBig (bold_110,
+    // line_height=125) occupe 130-255, lblDernier 310-374, lblBest
+    // 382-446. ~55px de marge entre lblBig et lblDernier.
+    lv_obj_align(lblBig, LV_ALIGN_TOP_MID, 0, 130);
 
     char lastBuf[16], bestBuf[16];
     formatLapTime(getLastFinishedLapMs(), lastBuf, sizeof(lastBuf));
@@ -1743,18 +1777,6 @@ static void buildCircuitScreen() {
 }
 
 static void circuitRowTappedCb(lv_event_t* e) {
-  // Bloque le changement de circuit pendant un enregistrement en cours --
-  // le tap direct valide immediatement sans confirmation (cf. commentaire
-  // ci-dessous), donc un tap parasite ici en pleine session changerait le
-  // circuit actif sous CourseManager sans aucun garde-fou. Risque concret
-  // si on arrive sur cet ecran via un faux BACK malgre la protection par
-  // maintien deja en place (cf. section README "Anti-faux-contact
-  // BACK/PUSH", 04/08) -- celle-ci reduit le risque de quitter l'ecran
-  // Statut par erreur, elle ne l'annule pas.
-  if (recordingEnabled) {
-    Serial.println("[UI] Tap circuit ignore -- enregistrement en cours, changement de circuit bloque.");
-    return;
-  }
   int idx = (int)(intptr_t)lv_event_get_user_data(e);
   applyCircuitSelection(idx); // tap direct = selectionne + valide en un seul geste
 }
@@ -1897,6 +1919,7 @@ static void refreshSessionListScreen() {
       lv_obj_add_event_cb(row, sessionRowTappedCb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
     }
   }
+
 }
 
 // Session actuellement selectionnee (meme ordre affiche -- plus recente en premier)
@@ -1978,11 +2001,8 @@ static void refreshSessionLapsScreen() {
                                         : lv_color_white(), 0);
     char lapBuf[16];
     formatLapTime(lap.lapMs, lapBuf, sizeof(lapBuf));
-    char vmaxBuf[16];
-    if (lap.maxSpeedKmh > 0) snprintf(vmaxBuf, sizeof(vmaxBuf), "  Vmax %.0f", lap.maxSpeedKmh);
-    else vmaxBuf[0] = '\0'; // anciennes sessions sans vitesse max enregistree
-    char buf[64];
-    snprintf(buf, sizeof(buf), "%sTour %d : %s%s%s", sel ? "> " : "  ", lap.lapNumber, lapBuf, isBest ? "  (best)" : "", vmaxBuf);
+    char buf[48];
+    snprintf(buf, sizeof(buf), "%sTour %d : %s%s", sel ? "> " : "  ", lap.lapNumber, lapBuf, isBest ? "  (best)" : "");
     lv_label_set_text(row, buf);
   }
 }
@@ -1995,47 +2015,26 @@ static lv_obj_t* lblFreezeRow;
 static lv_obj_t* lblRouteRow;
 
 static void settingsRowTappedCb(lv_event_t* e) {
-  // Bloque pendant un enregistrement -- demarrer le WiFi softAP en
-  // pleine session cumule deux risques : etat de capture incoherent
-  // avec CourseManager en cours de tour, et le souci deja documente de
-  // contention mutex LVGL/WiFi sur ce projet (softAP jamais appele
-  // depuis un callback tactile pour cette raison meme, cf. section
-  // "Pieges" plus bas -- meme logique appliquee ici cote garde-fou).
-  if (recordingEnabled) {
-    Serial.println("[UI] Tap WiFi ignore -- enregistrement en cours.");
-    return;
-  }
   selectingMode = false;
   wifiStartRequested = true; // traite dans loop(), pas ici (cf. commentaire pres de la declaration)
   goToScreen(SCR_WIFI); // tap direct = ouvre WiFi en un seul geste
 }
 
-// Cycle parmi FREEZE_PRESETS_S a chaque tap (0/5/10/15/20/30s, boucle) --
-// pas de PUSH implique ici, comme "Demarrer la capture" sur l'ecran
-// Nouveau circuit (tout-tactile pour ce genre de reglage simple).
+// Cycle parmi FREEZE_PRESETS_S a chaque tap (0/5/10/15/20/30s, boucle).
 static void refreshSettingsScreen();
 static void freezeRowTappedCb(lv_event_t* e) {
-  // Bloque pendant un enregistrement, meme logique que les autres tap
-  // directs -- pas de raison de laisser passer un tap parasite ici en
-  // pleine session, meme si l'impact d'un mauvais reglage de pause est
-  // mineur compare aux autres cas.
-  if (recordingEnabled) {
-    Serial.println("[UI] Tap pause ignore -- enregistrement en cours.");
-    return;
-  }
   int idx = 0;
   for (int i = 0; i < FREEZE_PRESETS_COUNT; i++) if (FREEZE_PRESETS_S[i] == lapFreezeS) { idx = i; break; }
   idx = (idx + 1) % FREEZE_PRESETS_COUNT;
   lapFreezeS = FREEZE_PRESETS_S[idx];
-  saveDisplaySettings();
   refreshSettingsScreen();
 }
 
 // Toggle ON/OFF par tap -- pas de sauvegarde (routeMode n'est jamais
 // persiste, cf. commentaire pres de sa declaration). Ignore le tap si
 // un enregistrement est en cours : changer de mode en plein REC
-// laisserait les accumulateurs de stats dans un etat incoherent (deja
-// utilises pour un circuit, plus pour une route, ou l'inverse).
+// laisserait les accumulateurs de stats dans un etat incoherent (aligne
+// sur chrono-AMOLED).
 static void routeRowTappedCb(lv_event_t* e) {
   if (recordingEnabled) return;
   routeMode = !routeMode;
@@ -2048,21 +2047,21 @@ static void buildSettingsScreen() {
   enableRingSwipe(scrSettings);
   createTitle(scrSettings, "Reglages");
 
-  lblSettingsRow = createListRow(scrSettings, 55);
+  lblSettingsRow = createListRow(scrSettings, 100);
   lv_obj_add_flag(lblSettingsRow, LV_OBJ_FLAG_CLICKABLE); // idem -- label non cliquable par defaut
   lv_obj_set_style_bg_opa(lblSettingsRow, LV_OPA_COVER, LV_STATE_PRESSED);
   lv_obj_set_style_bg_color(lblSettingsRow, lv_palette_main(LV_PALETTE_YELLOW), LV_STATE_PRESSED);
   lv_obj_set_style_text_color(lblSettingsRow, lv_color_black(), LV_STATE_PRESSED);
   lv_obj_add_event_cb(lblSettingsRow, settingsRowTappedCb, LV_EVENT_CLICKED, NULL);
 
-  lblFreezeRow = createListRow(scrSettings, 105);
+  lblFreezeRow = createListRow(scrSettings, 160);
   lv_obj_add_flag(lblFreezeRow, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_set_style_bg_opa(lblFreezeRow, LV_OPA_COVER, LV_STATE_PRESSED);
   lv_obj_set_style_bg_color(lblFreezeRow, lv_palette_main(LV_PALETTE_YELLOW), LV_STATE_PRESSED);
   lv_obj_set_style_text_color(lblFreezeRow, lv_color_black(), LV_STATE_PRESSED);
   lv_obj_add_event_cb(lblFreezeRow, freezeRowTappedCb, LV_EVENT_CLICKED, NULL);
 
-  lblRouteRow = createListRow(scrSettings, 155);
+  lblRouteRow = createListRow(scrSettings, 220);
   lv_obj_add_flag(lblRouteRow, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_set_style_bg_opa(lblRouteRow, LV_OPA_COVER, LV_STATE_PRESSED);
   lv_obj_set_style_bg_color(lblRouteRow, lv_palette_main(LV_PALETTE_YELLOW), LV_STATE_PRESSED);
@@ -2100,6 +2099,7 @@ static void buildWifiScreen() {
   lv_label_set_text(l3, "Connecte-toi au reseau ci-dessus, puis");
   lv_obj_t* l4 = createListRowSmall(scrWifi, 156);
   lv_label_set_text(l4, "va sur l'adresse IP depuis un navigateur.");
+
 }
 
 static void refreshWifiScreen() {
@@ -2117,14 +2117,6 @@ static void refreshWifiScreen() {
 // bas de l'ecran Circuit.
 
 static void startCaptureTappedCb(lv_event_t* e) {
-  // Bloque pendant un enregistrement -- armer une nouvelle capture de
-  // circuit alors qu'un enregistrement est deja en cours mettrait
-  // CourseManager dans un etat double (tour en cours + capture en
-  // attente) jamais prevu.
-  if (recordingEnabled) {
-    Serial.println("[UI] Tap nouvelle capture ignore -- enregistrement en cours.");
-    return;
-  }
   armNewCircuitCapture();
   goToScreen(SCR_STATUS);
 }
@@ -2153,6 +2145,7 @@ static void buildNewCircuitScreen() {
   lv_obj_set_style_text_color(lblStart, lv_color_white(), 0);
   lv_label_set_text(lblStart, "Demarrer la capture");
   lv_obj_center(lblStart);
+
 }
 
 // ===================== Refresh dispatcher =====================
@@ -2302,9 +2295,22 @@ static void handleBack() {
 // ===================== Setup / Loop =====================
 
 void setup() {
+  // Maintien alimentation batterie (GPIO16, BAT_ON) -- DOIT etre la
+  // toute premiere chose faite en boot, avant meme Serial.begin().
+  // Sur ce board, le bouton PWR n'alimente le micro que
+  // temporairement le temps qu'il demarre ; c'est au firmware de
+  // reprendre la main tres vite en pilotant GPIO16 pour maintenir
+  // l'alimentation, sinon elle retombe au relachement du bouton avant
+  // que le reste du code n'ait eu le temps de s'executer (constate le
+  // 14/08 : appui PWR -> LED GPS s'allume -> s'eteint au relachement,
+  // le micro n'atteignait jamais adc_bsp_init() qui pilotait GPIO16
+  // bien trop tard, apres GPS/SD/CourseManager/WebServer).
+  BAT_GPIO_Init();
+  BAT_ON();
+
   Serial.begin(115200);
   delay(1000);
-  Serial.println("=== firmware_241 (portage en cours, ecrans 536x240 non adaptes) -- GPS/CourseManager/SD reels (Circuit/Nouveau circuit/Connexion/Session/Reglages) ===");
+  Serial.println("=== firmware_241 (merge complet 14/08 : moteur reel + ecrans 600x450) -- GPS/CourseManager/SD reels (Circuit/Nouveau circuit/Connexion/Session/Reglages) ===");
 
   I2C_master_Init();
   Serial.println("[1/5] I2C partage ok");
@@ -2352,6 +2358,7 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(BACK_BUTTON), backButtonISR, FALLING);
   pinMode(PUSH_BUTTON, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(PUSH_BUTTON), pushButtonISR, FALLING);
+  pinMode(PWR_BUTTON, INPUT_PULLUP); // pas d'interruption -- simple sondage en loop(), pas urgent
   Serial.println("[4/5] PUSH + BACK ok");
 
   if (lvglLock(-1)) {
@@ -2457,6 +2464,24 @@ void loop() {
           lastDefinitiveStopMs = millis(); // cf. STATUS_REC_GRACE_AFTER_STOP_MS -- le geofencing peut rearmer le circuit en ~1s
         }
       }
+    }
+
+    // Extinction propre par appui long sur PWR (GPIO15) -- sans effet
+    // sur USB, utile uniquement sur batterie.
+    if (digitalRead(PWR_BUTTON) == LOW) {
+      if (pwrHoldSinceMs == 0) {
+        pwrHoldSinceMs = millis();
+      } else if (millis() - pwrHoldSinceMs >= PWR_HOLD_OFF_MS) {
+        Serial.println("PWR maintenu -- extinction.");
+        if (recordingEnabled) {
+          stopRecording(); // ferme proprement le fichier en cours avant de couper l'alim
+        }
+        delay(100); // laisse le temps au flush SD/LittleFS de se terminer
+        BAT_OFF();
+        delay(1000); // ne devrait pas etre atteint sur batterie (alim coupee) -- filet de securite si jamais sur USB
+      }
+    } else {
+      pwrHoldSinceMs = 0;
     }
     // Rotation retiree avec le rotatif physique (27/07) -- l'anneau
     // (Circuit/Connexion/Session/Reglages) se navigue desormais par swipe
