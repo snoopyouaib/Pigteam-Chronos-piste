@@ -1260,7 +1260,7 @@ void setup() {
     lv_obj_set_style_bg_color(scrSplash, lv_color_black(), 0);
     lv_obj_t* splashImg = lv_img_create(scrSplash);
     lv_img_set_src(splashImg, &splash_pigteam_img);
-    lv_obj_align(splashImg, LV_ALIGN_CENTER, 0, 0); // centree sur le canevas 600x450 (image source 536x240, pas de mise a l'echelle pour eviter le flou)
+    lv_obj_align(splashImg, LV_ALIGN_CENTER, 0, 0); // image 600x450 -- remplit tout le canevas, LV_ALIGN_CENTER reste correct (equivaut a 0,0 puisque meme taille que l'ecran)
     lv_scr_load(scrSplash);
 
     buildStatusScreen();
