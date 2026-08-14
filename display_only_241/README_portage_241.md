@@ -333,3 +333,16 @@ reste noir malgré tout :
    officielle mais jamais testée avec un vrai doigt sur ce firmware.
 
 
+## À reporter sur chrono-AMOLED (1.91) -- amélioration née sur le banc 2.41
+
+- **Clignotement du chrono pendant le temps figé** (`lapFreezeS`, réglage
+  "Pause chrono") -- 500ms allumé / 250ms éteint sur `lblBig`, pour
+  distinguer visuellement un temps de tour figé d'un chrono qui tourne
+  activement. Implémenté dans `updateStatusScreen()`, branche REC actif
+  (`if (millis() < lapFreezeUntilMs)`).
+
+Rafraîchissement de l'écran Statut testé un temps à 80ms (au lieu de
+250ms), finalement pas nécessaire pour le réglage 500/250 retenu (750ms
+= multiple exact de 250ms, motif fidèle même à ce taux) -- revenu à
+250ms. À revoir seulement si un futur réglage de clignotement tombe sur
+un cycle qui n'est pas multiple de 250ms.

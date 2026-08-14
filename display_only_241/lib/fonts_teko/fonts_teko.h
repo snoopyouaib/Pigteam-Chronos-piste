@@ -56,6 +56,7 @@
 // ecran noir, sans aucune erreur de compilation (piege rencontre au
 // premier essai).
 
+LV_FONT_DECLARE(lv_font_teko_bold_110); // chrono principal (12/08, agrandi depuis 84px)
 LV_FONT_DECLARE(lv_font_teko_bold_84);
 LV_FONT_DECLARE(lv_font_teko_bold_56);
 LV_FONT_DECLARE(lv_font_teko_bold_38);

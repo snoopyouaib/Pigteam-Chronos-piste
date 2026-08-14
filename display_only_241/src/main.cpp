@@ -497,7 +497,7 @@ static void buildStatusScreen() {
   lv_obj_align(lblBatt, LV_ALIGN_TOP_RIGHT, -4, 0);
 
   lblBig = lv_label_create(scrStatus);
-  lv_obj_set_style_text_font(lblBig, &lv_font_teko_bold_84, 0);
+  lv_obj_set_style_text_font(lblBig, &lv_font_teko_bold_110, 0); // chrono principal agrandi (12/08, etait bold_84)
   lv_obj_set_style_text_color(lblBig, lv_color_white(), 0);
 
   lblClock = lv_label_create(scrStatus);
@@ -522,14 +522,16 @@ static void buildStatusScreen() {
   lv_label_set_text(lblRecHint, "PRESS REC");
 
   lblDernier = lv_label_create(scrStatus);
-  lv_obj_set_style_text_font(lblDernier, &lv_font_teko_bold_38, 0); // etait medium_34, un poil trop petit
+  // bold_56, empile juste au-dessus de lblBest en bas d'ecran
+  // (cf. commentaires Y ci-dessous et sur lblBig/lblBest).
+  lv_obj_set_style_text_font(lblDernier, &lv_font_teko_bold_56, 0);
   lv_obj_set_style_text_color(lblDernier, lv_color_white(), 0);
-  lv_obj_align(lblDernier, LV_ALIGN_TOP_LEFT, 4, 162);
+  lv_obj_align(lblDernier, LV_ALIGN_TOP_LEFT, 4, 310);
 
   lblBest = lv_label_create(scrStatus);
-  lv_obj_set_style_text_font(lblBest, &lv_font_teko_bold_38, 0); // etait medium_34, un poil trop petit
+  lv_obj_set_style_text_font(lblBest, &lv_font_teko_bold_56, 0); // idem lblDernier
   lv_obj_set_style_text_color(lblBest, lv_color_white(), 0);
-  lv_obj_align(lblBest, LV_ALIGN_TOP_LEFT, 4, 202);
+  lv_obj_align(lblBest, LV_ALIGN_TOP_LEFT, 4, 382);
 
   lblTours = lv_label_create(scrStatus);
   lv_obj_set_style_text_font(lblTours, &lv_font_teko_bold_38, 0); // etait medium_34, aligne sur Dernier/Best
@@ -572,6 +574,7 @@ static void updateStatusScreen(unsigned long nowMs) {
 
   if (!recordingEnabled) {
     lv_obj_add_flag(lblRouteChrono, LV_OBJ_FLAG_HIDDEN); // au cas ou on vient de quitter le mode Route
+    lv_obj_clear_flag(lblBig, LV_OBJ_FLAG_HIDDEN); // au cas ou on stoppe pile en phase "eteinte" du clignotement (cf. branche REC actif)
     snprintf(buf, sizeof(buf), "%d km/h", (int)gpsSpeedKmh);
     lv_label_set_text(lblBig, buf);
     lv_obj_align(lblBig, LV_ALIGN_TOP_MID, 0, 40);
@@ -605,9 +608,10 @@ static void updateStatusScreen(unsigned long nowMs) {
     // (BOTTOM_RIGHT, meme taille) -- duree ecoulee depuis le depart, ne
     // repart jamais a zero. Dernier/Best/Tours toujours masques (aucun
     // sens sans notion de tour). Aligne sur chrono-AMOLED.
+    lv_obj_clear_flag(lblBig, LV_OBJ_FLAG_HIDDEN); // au cas ou on bascule en mode Route pile en phase "eteinte" du clignotement (cf. branche REC actif)
     snprintf(buf, sizeof(buf), "%d km/h", (int)gpsSpeedKmh);
     lv_label_set_text(lblBig, buf);
-    lv_obj_align(lblBig, LV_ALIGN_TOP_MID, 0, 40);
+    lv_obj_align(lblBig, LV_ALIGN_TOP_MID, 0, 130); // meme position que le chrono en REC actif (cf. plus bas)
 
     char timeBuf[10];
     getLocalDateTime(nullptr, 0, timeBuf, sizeof(timeBuf));
@@ -630,16 +634,30 @@ static void updateStatusScreen(unsigned long nowMs) {
     if (millis() < lapFreezeUntilMs) {
       // Tour vient de se terminer -- affiche encore son temps fige,
       // plutot que de reafficher direct le chrono du tour suivant.
+      // Clignote (500ms allume/250ms eteint) pour bien signaler que
+      // c'est un temps fige, pas le chrono qui continue de tourner --
+      // sinon rien ne distingue visuellement ce temps de tour termine
+      // d'un chrono actif normal.
       formatLapTime(getLastFinishedLapMs(), buf, sizeof(buf));
+      unsigned long phase = millis() % 750; // cycle 500ms ON + 250ms OFF = 750ms
+      bool blinkOn = phase < 500;
+      if (blinkOn) lv_obj_clear_flag(lblBig, LV_OBJ_FLAG_HIDDEN);
+      else lv_obj_add_flag(lblBig, LV_OBJ_FLAG_HIDDEN);
     } else if (currentLapMs > 0) {
       // Ligne franchie (getRaceStarted() true cote CourseManager/DovesLapTimer) -- chrono actif.
+      lv_obj_clear_flag(lblBig, LV_OBJ_FLAG_HIDDEN); // au cas ou on sort tout juste du clignotement ci-dessus
       formatLapTime(currentLapMs, buf, sizeof(buf));
     } else {
       // REC actif mais course pas encore demarree -- vitesse plus utile qu'un chrono fige.
+      lv_obj_clear_flag(lblBig, LV_OBJ_FLAG_HIDDEN); // idem
       snprintf(buf, sizeof(buf), "%d km/h", (int)gpsSpeedKmh);
     }
     lv_label_set_text(lblBig, buf);
-    lv_obj_align(lblBig, LV_ALIGN_TOP_MID, 0, 50);
+    // y=130 (remonte depuis 165, sur demande -- meme position que le
+    // mode Route desormais, cf. plus haut). lblBig (bold_110,
+    // line_height=125) occupe 130-255, lblDernier 310-374, lblBest
+    // 382-446. ~55px de marge entre lblBig et lblDernier.
+    lv_obj_align(lblBig, LV_ALIGN_TOP_MID, 0, 130);
 
     char lastBuf[16], bestBuf[16];
     formatLapTime(getLastFinishedLapMs(), lastBuf, sizeof(lastBuf));
