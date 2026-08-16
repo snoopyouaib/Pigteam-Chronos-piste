@@ -1,17 +1,22 @@
 /**
- * Chrono GPS moto piste -- firmware ESP32-S3-AMOLED-1.91 (firmware_191)
+ * Chrono GPS moto piste -- firmware ESP32-S3-AMOLED-2.41 (firmware_241)
  * ----------------------------------------------------------------------
- * Ex "display_only_191" (banc de test d'affichage 100% simule) --
- * devenu le vrai firmware : GPS reel (GpsManager), detection de
- * circuit/tour reelle (CourseManager, vendore depuis la lib publique
- * DovesLapTimer), sessions reelles (/sessions.csv, LittleFS), batterie
- * reelle (ADC interne), stockage SD reel (SdLogStorage, SDMMC).
- * WebServerManager (WiFi/telechargement) pas encore integre -- prochaine
- * etape.
+ * Portage complet (14/08) du firmware reel chrono-AMOLED (1.91") vers le
+ * module ESP32-S3-Touch-AMOLED-2.41 (SKU 30589, RM690B0 600x450, FT6336,
+ * revision materielle V2). Distinct de display_only_241, qui reste un
+ * banc de test ecran pur sans GPS/SD/batterie/WiFi reels.
+ * GPS reel (GpsManager), detection de circuit/tour reelle (CourseManager,
+ * vendore depuis la lib publique DovesLapTimer), sessions reelles
+ * (/sessions.csv, LittleFS), batterie reelle (ADC interne, GPIO17/ADC2 --
+ * PAS la meme broche que le 1.91), stockage SD reel (SdLogStorage,
+ * SDMMC), WebServerManager (WiFi/telechargement) integre.
+ * Ecrans reagences pour 600x450 (repris du banc display_only_241),
+ * details complets du portage dans README.md.
  *
- * Ecran + bouton PUSH simple (rotatif EC11 retire le 27/07, remplace par
- * un bouton poussoir simple sur la meme broche -- cf. commentaire pres de
- * PUSH_BUTTON) + bouton BACK.
+ * Ecran + bouton PUSH simple (rotatif EC11 retire le 27/07 sur le 1.91,
+ * remplace par un bouton poussoir simple sur la meme broche -- cf.
+ * commentaire pres de PUSH_BUTTON) + bouton BACK + bouton PWR (GPIO15,
+ * specifique au 2.41 -- extinction propre par appui long, cf. README.md).
  *
  * Navigation (pas de menu liste separe) :
  *   - Depuis Statut : BACK -> ecran Circuit (1er ecran de l'anneau)
@@ -92,13 +97,14 @@ static const unsigned long PUSH_DEBOUNCE_MS = 200;
 // le plus court des deux (choix delibere, plus dur a actionner par
 // inadvertance qu'un bouton plus long) et n'a plus d'ecran de
 // confirmation derriere lui pour rattraper une erreur -- d'ou un delai
-// plus long (700ms) que celui utilise auparavant pour la simple
-// navigation vers Circuit (300ms, qui avait un filet de securite
-// derriere). Un simple contact parasite (vibration) ressemble a un
-// front descendant isole, pas a un contact ferme en continu sur 700ms
-// -- largement en dessous du temps de reaction humain pour un vrai
-// appui volontaire.
-static const unsigned long BACK_HOLD_STOP_MS = 700;
+// plus long (1400ms sur le 2.41, double du 700ms initial du 1.91 --
+// demande explicite du 14/08 pour securiser encore plus l'arret) que
+// celui utilise auparavant pour la simple navigation vers Circuit
+// (300ms, qui avait un filet de securite derriere). Un simple contact
+// parasite (vibration) ressemble a un front descendant isole, pas a un
+// contact ferme en continu sur 1400ms -- largement en dessous du temps
+// de reaction humain pour un vrai appui volontaire, meme allonge.
+static const unsigned long BACK_HOLD_STOP_MS = 1400; // double du delai initial (700ms, cf. 1.91) -- securise l'arret, moins de risque de coupure accidentelle
 // PWR (GPIO15) -- extinction propre par appui long, ajoute le 14/08
 // maintenant qu'une vraie batterie est disponible pour tester. Plus
 // long que BACK_HOLD_STOP_MS pour eviter une extinction accidentelle
@@ -273,12 +279,18 @@ static unsigned long lapFreezeUntilMs = 0;
 static int lapFreezeS = 10;
 static const int FREEZE_PRESETS_S[] = { 0, 5, 10, 15, 20, 30 };
 static const int FREEZE_PRESETS_COUNT = 6;
+// Logs diagnostic (diag_*.csv, une ligne toutes les DIAG_WRITE_INTERVAL_MS)
+// desactives par defaut -- ecriture SD non essentielle au fonctionnement
+// (contrairement au log GPS detaille, log_*.csv, toujours actif), mais
+// qui use la carte sur la duree. Persiste comme lapFreezeS, ajoute le 14/08.
+static bool diagLogsEnabled = false;
 static const char* SETTINGS_FILE_PATH = "/settings.csv";
 
 static void saveDisplaySettings() {
   File f = LittleFS.open(SETTINGS_FILE_PATH, "w");
   if (!f) { Serial.println("Reglages : echec ecriture /settings.csv"); return; }
   f.printf("lapFreezeS,%d\n", lapFreezeS);
+  f.printf("diagLogsEnabled,%d\n", diagLogsEnabled ? 1 : 0);
   f.close();
 }
 
@@ -295,6 +307,8 @@ static void loadDisplaySettings() {
       for (int i = 0; i < FREEZE_PRESETS_COUNT; i++) {
         if (FREEZE_PRESETS_S[i] == v) { lapFreezeS = v; break; }
       }
+    } else if (line.startsWith("diagLogsEnabled,")) {
+      diagLogsEnabled = (line.substring(16).toInt() != 0);
     }
   }
   f.close();
@@ -867,14 +881,18 @@ static void startRecording() {
   loggingOk = true;
 
   snprintf(currentDiagLogPath, sizeof(currentDiagLogPath), "/diag_%s.csv", currentSessionCompactKey);
-  diagFile = gpsLogFs->open(currentDiagLogPath, "w");
-  if (diagFile) {
-    diagFile.println("local_time,uptime_s,batt_pct,batt_v,cpu_temp_c,free_heap,gps_hz,gps_fix,gps_sats,laps,detection_rejections");
-    diagFile.flush();
-    diagLoggingOk = true;
-    lastDiagWriteMs = 0; // force une premiere ligne rapidement plutot que d'attendre 30s
+  if (!diagLogsEnabled) {
+    Serial.println("REC : logs diagnostic desactives (reglage) -- pas de diag_*.csv pour cette session.");
   } else {
-    Serial.printf("REC : impossible de creer %s (log diag desactive pour cette session)\n", currentDiagLogPath);
+    diagFile = gpsLogFs->open(currentDiagLogPath, "w");
+    if (diagFile) {
+      diagFile.println("local_time,uptime_s,batt_pct,batt_v,cpu_temp_c,free_heap,gps_hz,gps_fix,gps_sats,laps,detection_rejections");
+      diagFile.flush();
+      diagLoggingOk = true;
+      lastDiagWriteMs = 0; // force une premiere ligne rapidement plutot que d'attendre 30s
+    } else {
+      Serial.printf("REC : impossible de creer %s (log diag desactive pour cette session)\n", currentDiagLogPath);
+    }
   }
 
   recordingEnabled = true;
@@ -1549,9 +1567,10 @@ static void buildStatusScreen() {
 }
 
 // ===================== Arret definitif (aligne sur chrono-AMOLED, 05/08) =====================
-// BACK maintenu 700ms pendant l'enregistrement (SCR_STATUS) = arret
-// definitif direct, sans ecran de confirmation -- cf. bloc dedie dans
-// loop() (BACK_HOLD_STOP_MS) et commentaire pres de cette constante.
+// BACK maintenu (BACK_HOLD_STOP_MS, 1400ms sur le 2.41) pendant
+// l'enregistrement (SCR_STATUS) = arret definitif direct, sans ecran
+// de confirmation -- cf. bloc dedie dans loop() et commentaire pres de
+// cette constante.
 // L'ancien systeme (SCR_CONFIRM_STOP, PUSH=reprendre/BACK=arreter)
 // etait source de confusion reelle sur le terrain, retire le 05/08.
 
@@ -2013,6 +2032,7 @@ static void refreshSessionLapsScreen() {
 static lv_obj_t* lblSettingsRow;
 static lv_obj_t* lblFreezeRow;
 static lv_obj_t* lblRouteRow;
+static lv_obj_t* lblDiagLogsRow;
 
 static void settingsRowTappedCb(lv_event_t* e) {
   selectingMode = false;
@@ -2038,6 +2058,16 @@ static void freezeRowTappedCb(lv_event_t* e) {
 static void routeRowTappedCb(lv_event_t* e) {
   if (recordingEnabled) return;
   routeMode = !routeMode;
+  refreshSettingsScreen();
+}
+
+// Toggle ON/OFF par tap, persiste comme lapFreezeS (contrairement a
+// routeMode) -- reglage materiel/usure SD, pas un mode de session
+// ponctuel, doit survivre au redemarrage.
+static void diagLogsRowTappedCb(lv_event_t* e) {
+  if (recordingEnabled) return;
+  diagLogsEnabled = !diagLogsEnabled;
+  saveDisplaySettings();
   refreshSettingsScreen();
 }
 
@@ -2067,6 +2097,13 @@ static void buildSettingsScreen() {
   lv_obj_set_style_bg_color(lblRouteRow, lv_palette_main(LV_PALETTE_YELLOW), LV_STATE_PRESSED);
   lv_obj_set_style_text_color(lblRouteRow, lv_color_black(), LV_STATE_PRESSED);
   lv_obj_add_event_cb(lblRouteRow, routeRowTappedCb, LV_EVENT_CLICKED, NULL);
+
+  lblDiagLogsRow = createListRow(scrSettings, 280);
+  lv_obj_add_flag(lblDiagLogsRow, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_style_bg_opa(lblDiagLogsRow, LV_OPA_COVER, LV_STATE_PRESSED);
+  lv_obj_set_style_bg_color(lblDiagLogsRow, lv_palette_main(LV_PALETTE_YELLOW), LV_STATE_PRESSED);
+  lv_obj_set_style_text_color(lblDiagLogsRow, lv_color_black(), LV_STATE_PRESSED);
+  lv_obj_add_event_cb(lblDiagLogsRow, diagLogsRowTappedCb, LV_EVENT_CLICKED, NULL);
 }
 
 static void refreshSettingsScreen() {
@@ -2081,6 +2118,9 @@ static void refreshSettingsScreen() {
 
   lv_obj_set_style_text_color(lblRouteRow, routeMode ? lv_palette_main(LV_PALETTE_GREEN) : lv_color_white(), 0);
   lv_label_set_text(lblRouteRow, routeMode ? "  Mode Route: ON" : "  Mode Route: OFF");
+
+  lv_obj_set_style_text_color(lblDiagLogsRow, diagLogsEnabled ? lv_palette_main(LV_PALETTE_GREEN) : lv_color_white(), 0);
+  lv_label_set_text(lblDiagLogsRow, diagLogsEnabled ? "  Logs diag: ON" : "  Logs diag: OFF");
 }
 
 // ===================== Ecran WiFi =====================

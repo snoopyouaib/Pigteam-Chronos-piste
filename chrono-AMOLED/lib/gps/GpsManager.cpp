@@ -6,19 +6,13 @@
 //
 // Portage du GpsManager.cpp du projet chrono GPS TFT -- meme interface
 // GpsManager.h, meme logique de parsing NMEA (RMC/GGA/GSA). Seul le
-// brochage 2.41 : GPIO12/13 utilises par le 1.91 sont desormais
-// QSPI_D1/D2 de l'ecran (conflit materiel direct) -- retour sur
-// GPIO43/44 (UART0 natif, libres sur le 2.41). Sans risque : le
-// deplacement 43/44->12/13 sur le 1.91 (04/08) n'etait pas du a une
-// broche ESP32 mais a un sertissage TX/RXD defaillant sur le
-// connecteur JST-PH du module (meme symptome 1Hz confirme sur les
-// deux paires de GPIO a l'epoque, cf. README section "Diagnostic GPS
-// bloque a 1Hz"). A verifier au banc : le point de soudure sur le
-// connecteur de ce module-ci, comme toujours.
+// brochage change : broches TXD/RXD dediees de la carte AMOLED 1.91
+// (GPIO12/13, UART1 -- deplace de GPIO43/44 le 04/08, cf. README
+// section "Diagnostic GPS bloque a 1Hz") au lieu des GPIO5/6 du
 // montage Tiny N8R8.
 
-#define GPS_RX_PIN 1   // TEST DIAGNOSTIC uniquement -- etait 43, bascule temporaire pour isoler un eventuel conflit specifique a 43/44 sur ce board (module + cable + connecteur + masse deja innocentes -- teste OK sur le 1.91). A cabler en filaire directement sur le header 34 broches, pas sur le connecteur JST GPS (qui reste sur 43/44).
-#define GPS_TX_PIN 2   // TEST DIAGNOSTIC uniquement -- etait 44
+#define GPS_RX_PIN 12  // <- TX du module GPS -- deplace de 44 (test bout de fil TX/RX mort sur 43/44, cf. diagnostic 04/08)
+#define GPS_TX_PIN 13  // -> RX du module GPS -- deplace de 43
 
 HardwareSerial GPSSerial(1); // UART1 de l'ESP32 (l'UART0 reste pour le Serial USB de debug)
 

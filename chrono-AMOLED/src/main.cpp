@@ -88,13 +88,14 @@ static const unsigned long PUSH_DEBOUNCE_MS = 200;
 // le plus court des deux (choix delibere, plus dur a actionner par
 // inadvertance qu'un bouton plus long) et n'a plus d'ecran de
 // confirmation derriere lui pour rattraper une erreur -- d'ou un delai
-// plus long (700ms) que celui utilise auparavant pour la simple
-// navigation vers Circuit (300ms, qui avait un filet de securite
-// derriere). Un simple contact parasite (vibration) ressemble a un
-// front descendant isole, pas a un contact ferme en continu sur 700ms
-// -- largement en dessous du temps de reaction humain pour un vrai
-// appui volontaire.
-static const unsigned long BACK_HOLD_STOP_MS = 700;
+// plus long (1400ms, double du 700ms initial -- allonge le 14/08 pour
+// securiser encore plus l'arret) que celui utilise auparavant pour la
+// simple navigation vers Circuit (300ms, qui avait un filet de
+// securite derriere). Un simple contact parasite (vibration) ressemble
+// a un front descendant isole, pas a un contact ferme en continu sur
+// 1400ms -- largement en dessous du temps de reaction humain pour un
+// vrai appui volontaire, meme allonge.
+static const unsigned long BACK_HOLD_STOP_MS = 1400; // double du delai initial (700ms)
 static unsigned long backHoldStopPendingSinceMs = 0; // 0 = pas d'appui BACK en attente de confirmation
 
 // Recalcul periodique du debit RMC reel (07/08, suite au constat que
@@ -260,12 +261,18 @@ static unsigned long lapFreezeUntilMs = 0;
 static int lapFreezeS = 10;
 static const int FREEZE_PRESETS_S[] = { 0, 5, 10, 15, 20, 30 };
 static const int FREEZE_PRESETS_COUNT = 6;
+// Logs diagnostic (diag_*.csv, une ligne toutes les DIAG_WRITE_INTERVAL_MS)
+// desactives par defaut -- ecriture SD non essentielle au fonctionnement
+// (contrairement au log GPS detaille, log_*.csv, toujours actif), mais
+// qui use la carte sur la duree. Persiste comme lapFreezeS, ajoute le 14/08.
+static bool diagLogsEnabled = false;
 static const char* SETTINGS_FILE_PATH = "/settings.csv";
 
 static void saveDisplaySettings() {
   File f = LittleFS.open(SETTINGS_FILE_PATH, "w");
   if (!f) { Serial.println("Reglages : echec ecriture /settings.csv"); return; }
   f.printf("lapFreezeS,%d\n", lapFreezeS);
+  f.printf("diagLogsEnabled,%d\n", diagLogsEnabled ? 1 : 0);
   f.close();
 }
 
@@ -282,6 +289,8 @@ static void loadDisplaySettings() {
       for (int i = 0; i < FREEZE_PRESETS_COUNT; i++) {
         if (FREEZE_PRESETS_S[i] == v) { lapFreezeS = v; break; }
       }
+    } else if (line.startsWith("diagLogsEnabled,")) {
+      diagLogsEnabled = (line.substring(16).toInt() != 0);
     }
   }
   f.close();
@@ -854,14 +863,18 @@ static void startRecording() {
   loggingOk = true;
 
   snprintf(currentDiagLogPath, sizeof(currentDiagLogPath), "/diag_%s.csv", currentSessionCompactKey);
-  diagFile = gpsLogFs->open(currentDiagLogPath, "w");
-  if (diagFile) {
-    diagFile.println("local_time,uptime_s,batt_pct,batt_v,cpu_temp_c,free_heap,gps_hz,gps_fix,gps_sats,laps,detection_rejections");
-    diagFile.flush();
-    diagLoggingOk = true;
-    lastDiagWriteMs = 0; // force une premiere ligne rapidement plutot que d'attendre 30s
+  if (!diagLogsEnabled) {
+    Serial.println("REC : logs diagnostic desactives (reglage) -- pas de diag_*.csv pour cette session.");
   } else {
-    Serial.printf("REC : impossible de creer %s (log diag desactive pour cette session)\n", currentDiagLogPath);
+    diagFile = gpsLogFs->open(currentDiagLogPath, "w");
+    if (diagFile) {
+      diagFile.println("local_time,uptime_s,batt_pct,batt_v,cpu_temp_c,free_heap,gps_hz,gps_fix,gps_sats,laps,detection_rejections");
+      diagFile.flush();
+      diagLoggingOk = true;
+      lastDiagWriteMs = 0; // force une premiere ligne rapidement plutot que d'attendre 30s
+    } else {
+      Serial.printf("REC : impossible de creer %s (log diag desactive pour cette session)\n", currentDiagLogPath);
+    }
   }
 
   recordingEnabled = true;
@@ -1561,6 +1574,7 @@ static void updateStatusScreen(unsigned long nowMs) {
 
   if (!recordingEnabled) {
     lv_obj_add_flag(lblRouteChrono, LV_OBJ_FLAG_HIDDEN); // au cas ou on vient de quitter le mode Route
+    lv_obj_clear_flag(lblBig, LV_OBJ_FLAG_HIDDEN); // au cas ou on stoppe pile en phase "eteinte" du clignotement (cf. branche REC actif)
     snprintf(buf, sizeof(buf), "%d km/h", (int)gpsSpeedKmh);
     lv_label_set_text(lblBig, buf);
     lv_obj_align(lblBig, LV_ALIGN_TOP_MID, 0, 40);
@@ -1594,6 +1608,7 @@ static void updateStatusScreen(unsigned long nowMs) {
     // (BOTTOM_RIGHT, meme taille) -- duree ecoulee depuis le depart, ne
     // repart jamais a zero. Dernier/Best/Tours toujours masques (aucun
     // sens sans notion de tour).
+    lv_obj_clear_flag(lblBig, LV_OBJ_FLAG_HIDDEN); // au cas ou on bascule en mode Route pile en phase "eteinte" du clignotement (cf. branche REC actif)
     snprintf(buf, sizeof(buf), "%d km/h", (int)gpsSpeedKmh);
     lv_label_set_text(lblBig, buf);
     lv_obj_align(lblBig, LV_ALIGN_TOP_MID, 0, 40);
@@ -1619,9 +1634,18 @@ static void updateStatusScreen(unsigned long nowMs) {
     if (millis() < lapFreezeUntilMs) {
       // Tour vient de se terminer -- affiche encore son temps fige,
       // plutot que de reafficher direct le chrono du tour suivant.
+      // Clignote (500ms allume/250ms eteint) pour bien signaler que
+      // c'est un temps fige, pas le chrono qui continue de tourner --
+      // sinon rien ne distingue visuellement ce temps de tour termine
+      // d'un chrono actif normal. Porte du 2.41 le 14/08.
       formatLapTime(getLastFinishedLapMs(), buf, sizeof(buf));
+      unsigned long phase = millis() % 750; // cycle 500ms ON + 250ms OFF = 750ms
+      bool blinkOn = phase < 500;
+      if (blinkOn) lv_obj_clear_flag(lblBig, LV_OBJ_FLAG_HIDDEN);
+      else lv_obj_add_flag(lblBig, LV_OBJ_FLAG_HIDDEN);
     } else if (currentLapMs > 0) {
       // Ligne franchie (getRaceStarted() true cote CourseManager/DovesLapTimer) -- chrono actif.
+      lv_obj_clear_flag(lblBig, LV_OBJ_FLAG_HIDDEN); // au cas ou on sort tout juste du clignotement ci-dessus
       formatLapTime(currentLapMs, buf, sizeof(buf));
     } else {
       // REC actif mais course pas encore demarree -- vitesse plus utile qu'un chrono fige.
@@ -1989,6 +2013,7 @@ static void refreshSessionLapsScreen() {
 static lv_obj_t* lblSettingsRow;
 static lv_obj_t* lblFreezeRow;
 static lv_obj_t* lblRouteRow;
+static lv_obj_t* lblDiagLogsRow;
 
 static void settingsRowTappedCb(lv_event_t* e) {
   // Bloque pendant un enregistrement -- demarrer le WiFi softAP en
@@ -2038,32 +2063,49 @@ static void routeRowTappedCb(lv_event_t* e) {
   refreshSettingsScreen();
 }
 
+// Toggle ON/OFF par tap, persiste comme lapFreezeS (contrairement a
+// routeMode) -- c'est un reglage materiel/usure SD, pas un mode de
+// session ponctuel, ca doit survivre au redemarrage.
+static void diagLogsRowTappedCb(lv_event_t* e) {
+  if (recordingEnabled) return;
+  diagLogsEnabled = !diagLogsEnabled;
+  saveDisplaySettings();
+  refreshSettingsScreen();
+}
+
 static void buildSettingsScreen() {
   scrSettings = lv_obj_create(NULL);
   lv_obj_set_style_bg_color(scrSettings, lv_color_black(), 0);
   enableRingSwipe(scrSettings);
   createTitle(scrSettings, "Reglages");
 
-  lblSettingsRow = createListRow(scrSettings, 55);
+  lblSettingsRow = createListRow(scrSettings, 42);
   lv_obj_add_flag(lblSettingsRow, LV_OBJ_FLAG_CLICKABLE); // idem -- label non cliquable par defaut
   lv_obj_set_style_bg_opa(lblSettingsRow, LV_OPA_COVER, LV_STATE_PRESSED);
   lv_obj_set_style_bg_color(lblSettingsRow, lv_palette_main(LV_PALETTE_YELLOW), LV_STATE_PRESSED);
   lv_obj_set_style_text_color(lblSettingsRow, lv_color_black(), LV_STATE_PRESSED);
   lv_obj_add_event_cb(lblSettingsRow, settingsRowTappedCb, LV_EVENT_CLICKED, NULL);
 
-  lblFreezeRow = createListRow(scrSettings, 105);
+  lblFreezeRow = createListRow(scrSettings, 88);
   lv_obj_add_flag(lblFreezeRow, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_set_style_bg_opa(lblFreezeRow, LV_OPA_COVER, LV_STATE_PRESSED);
   lv_obj_set_style_bg_color(lblFreezeRow, lv_palette_main(LV_PALETTE_YELLOW), LV_STATE_PRESSED);
   lv_obj_set_style_text_color(lblFreezeRow, lv_color_black(), LV_STATE_PRESSED);
   lv_obj_add_event_cb(lblFreezeRow, freezeRowTappedCb, LV_EVENT_CLICKED, NULL);
 
-  lblRouteRow = createListRow(scrSettings, 155);
+  lblRouteRow = createListRow(scrSettings, 134);
   lv_obj_add_flag(lblRouteRow, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_set_style_bg_opa(lblRouteRow, LV_OPA_COVER, LV_STATE_PRESSED);
   lv_obj_set_style_bg_color(lblRouteRow, lv_palette_main(LV_PALETTE_YELLOW), LV_STATE_PRESSED);
   lv_obj_set_style_text_color(lblRouteRow, lv_color_black(), LV_STATE_PRESSED);
   lv_obj_add_event_cb(lblRouteRow, routeRowTappedCb, LV_EVENT_CLICKED, NULL);
+
+  lblDiagLogsRow = createListRow(scrSettings, 180);
+  lv_obj_add_flag(lblDiagLogsRow, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_style_bg_opa(lblDiagLogsRow, LV_OPA_COVER, LV_STATE_PRESSED);
+  lv_obj_set_style_bg_color(lblDiagLogsRow, lv_palette_main(LV_PALETTE_YELLOW), LV_STATE_PRESSED);
+  lv_obj_set_style_text_color(lblDiagLogsRow, lv_color_black(), LV_STATE_PRESSED);
+  lv_obj_add_event_cb(lblDiagLogsRow, diagLogsRowTappedCb, LV_EVENT_CLICKED, NULL);
 }
 
 static void refreshSettingsScreen() {
@@ -2078,6 +2120,9 @@ static void refreshSettingsScreen() {
 
   lv_obj_set_style_text_color(lblRouteRow, routeMode ? lv_palette_main(LV_PALETTE_GREEN) : lv_color_white(), 0);
   lv_label_set_text(lblRouteRow, routeMode ? "  Mode Route: ON" : "  Mode Route: OFF");
+
+  lv_obj_set_style_text_color(lblDiagLogsRow, diagLogsEnabled ? lv_palette_main(LV_PALETTE_GREEN) : lv_color_white(), 0);
+  lv_label_set_text(lblDiagLogsRow, diagLogsEnabled ? "  Logs diag: ON" : "  Logs diag: OFF");
 }
 
 // ===================== Ecran WiFi =====================
