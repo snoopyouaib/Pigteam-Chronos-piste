@@ -1750,7 +1750,11 @@ static lv_obj_t* createTitle(lv_obj_t* parent, const char* text) {
 static lv_obj_t* createScrollList(lv_obj_t* parent, int16_t yTop, int16_t bottomMargin = 4) {
   lv_obj_t* cont = lv_obj_create(parent);
   lv_obj_remove_style_all(cont);
-  lv_obj_set_size(cont, 536, 240 - yTop - bottomMargin);
+  // 600x450 (2.41) -- PAS 536x240 (1.91). Bug de merge du 14/08 : cette
+  // fonction avait ete recopiee telle quelle avec les dimensions du
+  // 1.91, jamais adaptee -- corrige le 18/08 (remonte par l'utilisateur
+  // : trop peu de tours/sessions visibles sans raison apparente).
+  lv_obj_set_size(cont, 600, 450 - yTop - bottomMargin);
   lv_obj_set_pos(cont, 0, yTop);
   lv_obj_set_style_bg_opa(cont, LV_OPA_TRANSP, 0);
   lv_obj_set_style_pad_left(cont, 4, 0);
@@ -2020,8 +2024,11 @@ static void refreshSessionLapsScreen() {
                                         : lv_color_white(), 0);
     char lapBuf[16];
     formatLapTime(lap.lapMs, lapBuf, sizeof(lapBuf));
-    char buf[48];
-    snprintf(buf, sizeof(buf), "%sTour %d : %s%s", sel ? "> " : "  ", lap.lapNumber, lapBuf, isBest ? "  (best)" : "");
+    char vmaxBuf[16];
+    if (lap.maxSpeedKmh > 0) snprintf(vmaxBuf, sizeof(vmaxBuf), "  Vmax %.0f", lap.maxSpeedKmh);
+    else vmaxBuf[0] = '\0'; // anciennes sessions sans vitesse max enregistree
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%sTour %d : %s%s%s", sel ? "> " : "  ", lap.lapNumber, lapBuf, isBest ? "  (best)" : "", vmaxBuf);
     lv_label_set_text(row, buf);
   }
 }
