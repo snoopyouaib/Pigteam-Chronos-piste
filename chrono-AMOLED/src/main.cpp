@@ -1547,16 +1547,23 @@ static void buildStatusScreen() {
 }
 
 static void updateStatusScreen(unsigned long nowMs) {
-  char buf[64];
+  char buf[80];
   bool circuitDetected = detectionEffectivelyComplete();
   const char* gpsLabel = gpsActive ? "GPS OK" : "GPS --";
 
   if (circuitDetected) {
-    snprintf(buf, sizeof(buf), "%s  Fix:%d Sat:%d  -- %s", gpsLabel, gpsFixStatus, gpsNumSVs, getActiveCourseNameForDisplay());
+    snprintf(buf, sizeof(buf), "%s  Fix:%d Sat:%d  %.0fHz  -- %s", gpsLabel, gpsFixStatus, gpsNumSVs, gpsMeasuredRmcHz, getActiveCourseNameForDisplay());
   } else {
-    snprintf(buf, sizeof(buf), "%s  Fix:%d Sat:%d", gpsLabel, gpsFixStatus, gpsNumSVs);
+    snprintf(buf, sizeof(buf), "%s  Fix:%d Sat:%d  %.0fHz", gpsLabel, gpsFixStatus, gpsNumSVs, gpsMeasuredRmcHz);
   }
   lv_label_set_text(lblGps, buf);
+  // Rouge si le debit RMC reel tombe sous 8Hz (config 10Hz pas
+  // appliquee/perdue) -- meme seuil et meme logique que l'ecran
+  // Connexion (lblConnGps), ajoute ici le 18/08 suite au bug de
+  // connexion GPS descendu en 1Hz constate en piste le week-end du
+  // 16-17/08 -- utile d'avoir l'info visible sans devoir naviguer
+  // jusqu'a Connexion en pleine session.
+  lv_obj_set_style_text_color(lblGps, (gpsActive && gpsMeasuredRmcHz < 8.0f) ? lv_palette_main(LV_PALETTE_RED) : lv_color_white(), 0);
 
   if (recordingEnabled) lv_obj_clear_flag(lblRec, LV_OBJ_FLAG_HIDDEN);
   else lv_obj_add_flag(lblRec, LV_OBJ_FLAG_HIDDEN);
