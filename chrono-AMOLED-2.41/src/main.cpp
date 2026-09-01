@@ -1800,6 +1800,18 @@ static void buildCircuitScreen() {
 }
 
 static void circuitRowTappedCb(lv_event_t* e) {
+  // Bloque le changement de circuit pendant un enregistrement en cours --
+  // le tap direct valide immediatement sans confirmation, donc un tap
+  // parasite ici en pleine session changerait le circuit actif sous
+  // CourseManager sans aucun garde-fou. Manquait sur le 2.41 depuis le
+  // merge du 14/08 (le banc display_only_241 n'avait pas
+  // d'enregistrement reel, donc pas besoin de cette protection --
+  // repere et corrige le 18/08 en comparant au 1.91, cf. meme garde-fou
+  // present depuis le debut sur ce dernier).
+  if (recordingEnabled) {
+    Serial.println("[UI] Tap circuit ignore -- enregistrement en cours, changement de circuit bloque.");
+    return;
+  }
   int idx = (int)(intptr_t)lv_event_get_user_data(e);
   applyCircuitSelection(idx); // tap direct = selectionne + valide en un seul geste
 }
